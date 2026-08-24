@@ -33,7 +33,6 @@ const Parser = struct {
 
     fn nextToken(self: *Parser) ![]const u8 {
         self.skipWhitespaceAndComments();
-        if (self.index >= self.data.len) return error.InvalidPpm;
         const start = self.index;
         while (self.index < self.data.len) : (self.index += 1) {
             const c = self.data[self.index];
@@ -44,14 +43,11 @@ const Parser = struct {
     }
 
     fn nextU32(self: *Parser) !u32 {
-        const token = try self.nextToken();
-        return std.fmt.parseInt(u32, token, 10) catch error.InvalidPpm;
+        return std.fmt.parseInt(u32, try self.nextToken(), 10) catch error.InvalidPpm;
     }
 };
 
 pub fn decode(allocator: Allocator, data: []const u8) !RgbImage {
-    if (!looksLike(data)) return error.InvalidPpm;
-
     var parser = Parser{ .data = data };
     const magic = try parser.nextToken();
     const grayscale = std.mem.eql(u8, magic, "P5");
@@ -59,28 +55,23 @@ pub fn decode(allocator: Allocator, data: []const u8) !RgbImage {
 
     const width = try parser.nextU32();
     const height = try parser.nextU32();
-    const maxval = try parser.nextU32();
-    if (maxval != 255) return error.UnsupportedPpm;
-    if (parser.index >= data.len) return error.InvalidPpm;
-    // Single whitespace separator before the raster.
-    const sep = parser.data[parser.index];
-    if (!std.ascii.isWhitespace(sep)) return error.InvalidPpm;
+    if (try parser.nextU32() != 255) return error.UnsupportedPpm;
+
+    // Exactly one whitespace byte separates the header from the raster; anything
+    // after it is pixel data, including bytes that happen to look like a comment.
+    if (parser.index >= data.len or !std.ascii.isWhitespace(data[parser.index])) return error.InvalidPpm;
     parser.index += 1;
 
-    const pixels = std.math.mul(usize, width, height) catch return error.InvalidImageSize;
-    const channels: usize = if (grayscale) 1 else 3;
-    const needed = std.math.mul(usize, pixels, channels) catch return error.InvalidPpm;
-    if (parser.data.len - parser.index < needed) return error.InvalidPpm;
-    const raster = parser.data[parser.index..][0..needed];
+    // Validate before sizing anything from the header.
+    const n = try cipher.pixelCount(width, height);
+    const raster_len = n * @as(usize, if (grayscale) 1 else 3);
+    if (data.len - parser.index < raster_len) return error.InvalidPpm;
+    const raster = data[parser.index..][0..raster_len];
 
-    const rgb = try allocator.alloc(u8, std.math.mul(usize, pixels, 3) catch return error.InvalidImageSize);
+    const rgb = try allocator.alloc(u8, n * 3);
     errdefer allocator.free(rgb);
     if (grayscale) {
-        for (raster, 0..) |g, i| {
-            rgb[i * 3] = g;
-            rgb[i * 3 + 1] = g;
-            rgb[i * 3 + 2] = g;
-        }
+        for (std.mem.bytesAsSlice([3]u8, rgb), raster) |*px, gray| px.* = .{ gray, gray, gray };
     } else {
         @memcpy(rgb, raster);
     }
@@ -90,12 +81,14 @@ pub fn decode(allocator: Allocator, data: []const u8) !RgbImage {
 pub fn encode(allocator: Allocator, width: u32, height: u32, rgb: []const u8) ![]u8 {
     const n = try cipher.pixelCount(width, height);
     if (rgb.len != n * 3) return error.InvalidImageSize;
-    const header = try std.fmt.allocPrint(allocator, "P6\n{d} {d}\n255\n", .{ width, height });
-    defer allocator.free(header);
-    const out = try allocator.alloc(u8, header.len + rgb.len);
-    @memcpy(out[0..header.len], header);
-    @memcpy(out[header.len..], rgb);
-    return out;
+
+    var out = std.ArrayList(u8).init(allocator);
+    errdefer out.deinit();
+    // "P6\n<w> <h>\n255\n" is at most 26 bytes for u32 dimensions.
+    try out.ensureTotalCapacityPrecise(rgb.len + 26);
+    try out.writer().print("P6\n{d} {d}\n255\n", .{ width, height });
+    out.appendSliceAssumeCapacity(rgb);
+    return out.toOwnedSlice();
 }
 
 test "ppm encode/decode roundtrip" {
@@ -115,16 +108,35 @@ test "ppm encode/decode roundtrip" {
 
 test "ppm P5 grayscale expands to rgb" {
     const allocator = std.testing.allocator;
-    const data = "P5\n2 1\n255\n\x10\x20";
-    const decoded = try decode(allocator, data);
+    const decoded = try decode(allocator, "P5\n2 1\n255\n\x10\x20");
     defer allocator.free(decoded.rgb);
     try std.testing.expectEqualSlices(u8, &.{ 0x10, 0x10, 0x10, 0x20, 0x20, 0x20 }, decoded.rgb);
 }
 
-test "ppm comments are ignored" {
+test "ppm comments and extra header whitespace are ignored" {
     const allocator = std.testing.allocator;
-    const data = "P6\n# comment\n1 1\n255\n\x01\x02\x03";
-    const decoded = try decode(allocator, data);
-    defer allocator.free(decoded.rgb);
-    try std.testing.expectEqualSlices(u8, &.{ 1, 2, 3 }, decoded.rgb);
+    for ([_][]const u8{
+        "P6\n# comment\n1 1\n255\n\x01\x02\x03",
+        "P6  1\t1\n\n255\n\x01\x02\x03",
+        "P6\n1 1\n# trailing comment\n255\n\x01\x02\x03",
+    }) |source| {
+        const decoded = try decode(allocator, source);
+        defer allocator.free(decoded.rgb);
+        try std.testing.expectEqualSlices(u8, &.{ 1, 2, 3 }, decoded.rgb);
+    }
+}
+
+test "ppm decoder rejects malformed input" {
+    const allocator = std.testing.allocator;
+    // Not a PPM at all.
+    try std.testing.expectError(error.InvalidPpm, decode(allocator, "P4\n1 1\n255\n\x00"));
+    // Raster shorter than the header promises.
+    try std.testing.expectError(error.InvalidPpm, decode(allocator, "P6\n4 4\n255\n\x01\x02\x03"));
+    // Header truncated mid-way.
+    try std.testing.expectError(error.InvalidPpm, decode(allocator, "P6\n2 2\n"));
+    // 16-bit samples are not supported.
+    try std.testing.expectError(error.UnsupportedPpm, decode(allocator, "P6\n1 1\n65535\n\x00" ** 6));
+    // Zero and absurd dimensions are rejected before any allocation.
+    try std.testing.expectError(error.InvalidImageSize, decode(allocator, "P6\n0 1\n255\n"));
+    try std.testing.expectError(error.InvalidImageSize, decode(allocator, "P6\n100000 100000\n255\n"));
 }

@@ -1,53 +1,60 @@
 const std = @import("std");
 
+const Tool = struct {
+    name: []const u8,
+    source: []const u8,
+    /// Name and description of the `zig build <step>` shortcut that runs it.
+    step: []const u8,
+    description: []const u8,
+};
+
+const tools = [_]Tool{
+    .{
+        .name = "to-noise",
+        .source = "src/to_noise.zig",
+        .step = "to-noise",
+        .description = "Transform an image into keyed noise",
+    },
+    .{
+        .name = "from-noise",
+        .source = "src/from_noise.zig",
+        .step = "from-noise",
+        .description = "Reconstruct an image from keyed noise",
+    },
+    .{
+        .name = "generate-sample",
+        .source = "src/generate_sample.zig",
+        .step = "sample",
+        .description = "Write a colorful sample image",
+    },
+};
+
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    const to_noise = b.addExecutable(.{
-        .name = "to-noise",
-        .root_source_file = b.path("src/to_noise.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    b.installArtifact(to_noise);
+    for (tools) |tool| {
+        const exe = b.addExecutable(.{
+            .name = tool.name,
+            .root_source_file = b.path(tool.source),
+            .target = target,
+            .optimize = optimize,
+        });
+        b.installArtifact(exe);
 
-    const from_noise = b.addExecutable(.{
-        .name = "from-noise",
-        .root_source_file = b.path("src/from_noise.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    b.installArtifact(from_noise);
+        const run = b.addRunArtifact(exe);
+        run.step.dependOn(b.getInstallStep());
+        if (b.args) |args| run.addArgs(args);
+        b.step(tool.step, tool.description).dependOn(&run.step);
+    }
 
-    const generate_sample = b.addExecutable(.{
-        .name = "generate-sample",
-        .root_source_file = b.path("src/generate_sample.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    b.installArtifact(generate_sample);
-
-    const run_to_noise = b.addRunArtifact(to_noise);
-    run_to_noise.step.dependOn(b.getInstallStep());
-    if (b.args) |args| run_to_noise.addArgs(args);
-    b.step("to-noise", "Transform an image into keyed noise").dependOn(&run_to_noise.step);
-
-    const run_from_noise = b.addRunArtifact(from_noise);
-    run_from_noise.step.dependOn(b.getInstallStep());
-    if (b.args) |args| run_from_noise.addArgs(args);
-    b.step("from-noise", "Reconstruct an image from keyed noise").dependOn(&run_from_noise.step);
-
-    const run_sample = b.addRunArtifact(generate_sample);
-    run_sample.step.dependOn(b.getInstallStep());
-    if (b.args) |args| run_sample.addArgs(args);
-    b.step("sample", "Write a colorful sample image").dependOn(&run_sample.step);
-
+    // The unit tests cover optimizer-sensitive code (prefetching, unchecked
+    // scanline loops), so run them in the selected mode rather than only in
+    // Debug: `zig build test -Doptimize=ReleaseFast` is a meaningful check.
     const unit_tests = b.addTest(.{
         .root_source_file = b.path("src/tests.zig"),
         .target = target,
         .optimize = optimize,
     });
-    const run_tests = b.addRunArtifact(unit_tests);
-    b.step("test", "Run unit tests").dependOn(&run_tests.step);
+    b.step("test", "Run unit tests").dependOn(&b.addRunArtifact(unit_tests).step);
 }
