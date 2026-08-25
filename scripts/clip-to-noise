@@ -127,14 +127,10 @@ fi
 
 if [ "$sealed" = 1 ]; then
     echo >&2
-    if [ ${#recipients[@]} -eq 1 ]; then
-        echo "sealed to ${recipients[0]}. Send the file; there is no key to send" >&2
-        echo "with it, and nothing you can do to open it again yourself." >&2
-    else
-        echo "sealed to ${#recipients[@]} recipients: ${recipients[*]}." >&2
-        echo "Send the file; there is no key to send with it, and nothing you can" >&2
-        echo "do to open it again yourself." >&2
-    fi
+    # Naming them back is the only place a typo that resolved to the wrong
+    # person would show up.
+    echo "sealed to ${recipients[*]}. Send the file; there is no key to send with" >&2
+    echo "it - and unless one of those keys is yours, nothing here opens it again." >&2
 fi
 
 if [ "$minted" = 1 ]; then

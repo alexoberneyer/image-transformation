@@ -4,3 +4,6 @@ zig-out/
 examples/*.png
 examples/*.ppm
 examples/*.pnm
+
+# Rendered from scripts/templates/ by scripts/refresh-recipients.
+scripts/raycast/image-to-noise-sealed.sh
