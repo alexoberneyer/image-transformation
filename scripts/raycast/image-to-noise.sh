@@ -8,7 +8,6 @@
 # Optional parameters:
 # @raycast.icon 🌀
 # @raycast.packageName Image Noise
-# @raycast.argument1 { "type": "text", "placeholder": "recipient (optional)", "optional": true }
 
 # Documentation:
 # @raycast.description Turn the image on the clipboard into keyed noise, ready to paste
@@ -22,16 +21,12 @@
 # that print is the only copy anyone else can be handed - a one-line summary
 # would hide exactly the thing that cannot be recovered later.
 #
-# The recipient argument is what makes the hotkey usable for sending something.
-# Left empty it behaves as it always did: a shared key, minted if there is none,
-# and a hex string to hand over somehow. Filled in, the image is sealed to that
-# person's ssh-ed25519 public key and there is nothing to hand over at all -
-# which also means this machine can no longer open the result.
-#
-# A short name is the point. `resolve_recipient` looks under
-# $IMAGE_NOISE_RECIPIENTS_DIR (default ~/.config/image-noise/recipients), so
-# typing "alex" beats pasting eighty characters of base64 into a hotkey.
-# $IMAGE_NOISE_RECIPIENTS sets a standing default for when even that is too much.
+# This is the shared-key command, and it takes no argument on purpose: one
+# keystroke, no prompt. Sending an image to somebody else is a different intent
+# with a different consequence - a sealed image cannot be opened by the machine
+# that made it - so it lives in its own command, `Seal Image to Noise`, where it
+# gets its own hotkey and cannot happen by leaving a field blank or filling one
+# by accident.
 #
 # The default file-reference mode is the one that survives being pasted into a
 # chat, so --bitmap is deliberately not reachable from here: a hotkey that
@@ -46,12 +41,4 @@
 export PATH="/opt/homebrew/bin:$PATH"
 
 scripts_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
-noise_args=()
-
-# A name typed into a hotkey field picks up whatever whitespace came with it.
-who=${1:-}
-who="${who#"${who%%[![:space:]]*}"}"
-who="${who%"${who##*[![:space:]]}"}"
-[ -n "$who" ] && noise_args=(-r "$who")
-
-exec "$scripts_dir/clip-to-noise" "${noise_args[@]}" 2>&1
+exec "$scripts_dir/clip-to-noise" 2>&1

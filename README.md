@@ -260,8 +260,10 @@ scripts/clip-to-noise -r alex -r bob   # both of them, neither of you
 ```
 
 `$IMAGE_NOISE_RECIPIENTS` sets a standing default, so the plain
-`scripts/clip-to-noise` seals too. `$IMAGE_NOISE_RECIPIENTS_DIR` moves the
-directory.
+`scripts/clip-to-noise` seals too, and `$IMAGE_NOISE_RECIPIENTS_DIR` moves the
+directory. Both are shell environment, so they reach the terminal and nothing
+else - a hotkey never sees them, for the reason in [Raycast](#raycast-macos)
+below.
 
 Coming back, nothing needs to be said at all. `clip-from-noise` asks the file
 how it wants to be opened - `from-noise --inspect` reads the header, which
@@ -358,20 +360,44 @@ that the way you would treat any other secret on screen.
 
 ## Raycast (macOS)
 
-`scripts/raycast/` holds two Raycast script commands wrapping the clipboard
+`scripts/raycast/` holds three Raycast script commands wrapping the clipboard
 scripts, so the round trip runs from a hotkey instead of a terminal:
 
-| Command | Wraps | Argument |
+| Command | Wraps | Arguments |
 | --- | --- | --- |
-| **Image to Noise** | `clip-to-noise` | recipient, optional |
+| **Image to Noise** | `clip-to-noise` | none |
+| **Seal Image to Noise** | `clip-to-noise -r` | recipient dropdown, plus free text |
 | **Image from Noise** | `clip-from-noise` | key or passphrase, optional |
 
-**Image to Noise** takes a recipient. Left empty it behaves as it always did:
-a shared key, minted if there is none, printed once. Type a name filed under
-`~/.config/image-noise/recipients` and the image is sealed to that person
-instead, with nothing to hand over and no way for this machine to open it
-again. A short name is the point - a hotkey is no place to paste eighty
-characters of base64.
+**The two forward commands are deliberately separate.** Encrypting something
+for yourself and sending it to somebody else are different intents with
+different consequences - a sealed image cannot be opened by the machine that
+made it - and one command with an optional field would let either turn into the
+other by leaving it blank or filling it in by mistake. Two commands also means
+two hotkeys, and `Image to Noise` keeps taking no argument at all: one
+keystroke, no prompt, exactly as before.
+
+**Seal Image to Noise takes the recipient two ways, because neither covers
+everything.** The dropdown lists whatever is saved under
+`~/.config/image-noise/recipients` and is the reason this is worth a hotkey.
+The text field is everything else: a name the dropdown has not caught up with,
+a path to a `.pub`, or a key pasted whole. They add up rather than override, so
+picking `alex` and typing `me` seals to both - which is how you keep a copy for
+yourself, with your own public key saved as `me.pub`.
+
+A Raycast dropdown is a static list inside the script file; there is no way to
+fill one in at run time. `scripts/refresh-recipients` rewrites that one line
+from the directory:
+
+```bash
+cp their_key.pub ~/.config/image-noise/recipients/alex.pub
+scripts/refresh-recipients        # dropdown now offers: alex
+```
+
+It skips anything that is not `ssh-ed25519` rather than offering an entry that
+could never work, and it edits a tracked file, so expect a one-line diff
+afterwards. Forgetting to run it is never blocking - the name still works typed
+into the text field.
 
 Build once first, so the first press of the hotkey is not a compile:
 
@@ -392,10 +418,11 @@ an authorization dialog in the way.
 Three things about the wrappers are deliberate.
 
 **They run in `fullOutput` mode.** The interesting output is never the last
-line. Going out, a minted key is printed once and is the only copy a recipient
-can be handed - and when sealing, the line saying which recipients it went to is
-the only confirmation you sealed to who you meant. `compact` shows one line and
-would hide either.
+line. `Image to Noise` prints a minted key once, and that print is the only copy
+anyone else can be handed. `Seal Image to Noise` prints who it sealed to, which
+is the only confirmation it went to the person you meant - and the only place
+you would notice a typo that resolved to somebody else's key. `compact` shows
+one line and would hide both.
 
 **They fold stderr into stdout.** The clipboard scripts report on stderr to keep
 their pipes clean, and Raycast displays stdout.
@@ -404,6 +431,11 @@ their pipes clean, and Raycast displays stdout.
 non-interactive shell that reads no profile, so the PATH is bare and `zig` -
 which `require_tools` falls back to - is not on it. `swiftc` already lives in
 `/usr/bin` and needs no help.
+
+That last point is why the dropdown exists rather than an environment variable:
+a shell that reads no profile never sees `$IMAGE_NOISE_RECIPIENTS` either, so a
+standing default set in a shell rc works from a terminal and nowhere near a
+hotkey.
 
 `--bitmap` is deliberately not reachable from here. Inlining a bitmap lets the
 next app re-encode the noise, and a single keystroke is too short a path to an

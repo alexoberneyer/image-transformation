@@ -1,0 +1,95 @@
+#!/usr/bin/env bash
+#
+# Rewrites the recipient dropdown in the "Seal Image to Noise" Raycast command
+# from whatever is saved in the recipients directory.
+#
+# A Raycast dropdown is a static list baked into the script file - there is no
+# way to fill one in at run time - so adding a friend means rewriting that one
+# line. This does that and nothing else. The text field on the same command is
+# what covers the gap in between, so forgetting to run this is never blocking:
+# the name still works typed.
+#
+# Keys that are not ssh-ed25519 are listed and skipped rather than offered, on
+# the grounds that a dropdown entry which cannot possibly work is worse than no
+# entry at all.
+#
+# Usage: refresh-recipients
+
+source "$(dirname -- "${BASH_SOURCE[0]}")/common.sh"
+
+target="$repo_root/scripts/raycast/image-to-noise-sealed.sh"
+[ -f "$target" ] || { echo "${0##*/}: cannot find $target" >&2; exit 1; }
+
+mkdir -p "$recipients_dir"
+
+names=()
+skipped=()
+shopt -s nullglob
+for key in "$recipients_dir"/*.pub; do
+    name=${key##*/}
+    name=${name%.pub}
+    # The first field of a public key file is its type, and only one type can
+    # be sealed to.
+    if ! read -r kind _rest < "$key" 2>/dev/null || [ "$kind" != "ssh-ed25519" ]; then
+        skipped+=("$name")
+        continue
+    fi
+    names+=("$name")
+done
+shopt -u nullglob
+
+json_string() {
+    local value=$1
+    value=${value//\\/\\\\}
+    value=${value//\"/\\\"}
+    printf '%s' "$value"
+}
+
+data=""
+if [ ${#names[@]} -gt 0 ]; then
+    for name in "${names[@]}"; do
+        [ -n "$data" ] && data="$data, "
+        data="$data{\"title\": \"$(json_string "$name")\", \"value\": \"$(json_string "$name")\"}"
+    done
+else
+    # Raycast wants a non-empty list, and the placeholder keeps the file's shape
+    # stable so this script has something to rewrite next time.
+    data='{"title": "(none saved yet)", "value": ""}'
+fi
+
+line="# @raycast.argument1 {\"type\": \"dropdown\", \"placeholder\": \"recipient\", \"optional\": true, \"data\": [$data]}"
+
+tmp=$(mktemp "${TMPDIR:-/tmp}/refresh-recipients.XXXXXX")
+trap 'rm -f "$tmp"' EXIT
+
+# Passed through the environment rather than -v, which would process backslash
+# escapes in a value that is already JSON.
+if ! REFRESH_LINE="$line" awk '
+    /^# @raycast\.argument1 / { print ENVIRON["REFRESH_LINE"]; replaced = 1; next }
+    { print }
+    END { if (!replaced) exit 3 }
+' "$target" > "$tmp"; then
+    echo "${0##*/}: no @raycast.argument1 line in $target to rewrite" >&2
+    exit 1
+fi
+
+# Never install something that is not a script any more.
+if ! bash -n "$tmp"; then
+    echo "${0##*/}: the rewritten file does not parse; leaving the original alone" >&2
+    exit 1
+fi
+
+# `cat >` rather than `mv`, so the file keeps its mode and Raycast keeps its
+# registration.
+cat "$tmp" > "$target"
+
+if [ ${#names[@]} -gt 0 ]; then
+    echo "dropdown now offers: ${names[*]}"
+else
+    echo "no ssh-ed25519 keys in $recipients_dir, so the dropdown is empty."
+    echo "Save one and run this again:"
+    echo "  cp their_key.pub $recipients_dir/alex.pub"
+fi
+if [ ${#skipped[@]} -gt 0 ]; then
+    echo "skipped (not ssh-ed25519): ${skipped[*]}"
+fi
