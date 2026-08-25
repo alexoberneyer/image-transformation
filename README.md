@@ -130,6 +130,18 @@ belongs to - opening one is a trial decryption, so the image does not carry a
 list of who can read it. `--identity` can be repeated too, and each is tried in
 turn.
 
+`--inspect` says how an image expects to be opened without opening it. It reads
+the header only, so it needs no key and cannot fail for the wrong reason:
+
+```
+$ from-noise --inspect noise.png
+format v2
+keying x25519
+recipients 2
+width 320
+height 240
+```
+
 **Only `ssh-ed25519`.** RSA would need OAEP, which Zig's standard library keeps
 inside its certificate machinery rather than exposing for encryption, and ECDSA
 keys cannot do this at all - the same two exclusions age settles on. If a friend
@@ -216,6 +228,9 @@ in sight. They build what they need on first run.
 # copy an image, then:
 scripts/clip-to-noise           # clipboard now holds the noise
 scripts/clip-from-noise         # ...and now the original again
+
+# or seal it to somebody, and there is no key to hand over at all
+scripts/clip-to-noise -r alex
 ```
 
 `clip-from-noise -i <path>` reads the noise from a file instead of the
@@ -228,6 +243,46 @@ across everything instead, set it up once:
 
 ```bash
 security add-generic-password -s image-noise -a "$USER" -w
+```
+
+### Sealing from the clipboard
+
+`-r` seals to somebody's public key instead, and then none of the above applies:
+nothing is minted, nothing is stored in the keychain, and nothing has to be sent
+alongside the file. Give it the key, a path to it, or a short name:
+
+```bash
+mkdir -p ~/.config/image-noise/recipients
+cp ~/Downloads/alex_id_ed25519.pub ~/.config/image-noise/recipients/alex.pub
+
+scripts/clip-to-noise -r alex          # now `-r alex` is enough, forever
+scripts/clip-to-noise -r alex -r bob   # both of them, neither of you
+```
+
+`$IMAGE_NOISE_RECIPIENTS` sets a standing default, so the plain
+`scripts/clip-to-noise` seals too. `$IMAGE_NOISE_RECIPIENTS_DIR` moves the
+directory.
+
+Coming back, nothing needs to be said at all. `clip-from-noise` asks the file
+how it wants to be opened - `from-noise --inspect` reads the header, which
+costs no key and cannot prompt for the wrong secret - and picks the private key
+or the keychain accordingly:
+
+```bash
+scripts/clip-from-noise         # sealed or not, it works out which
+```
+
+The private key is `$IMAGE_NOISE_IDENTITY`, or `~/.ssh/id_ed25519`. If it is
+passphrase-protected you are asked for the passphrase, or it comes from
+`$IMAGE_NOISE_IDENTITY_PASSPHRASE` where there is no terminal to ask on.
+
+One thing worth being sure about before you use this in anger: **a sealed image
+cannot be opened by the machine that made it.** That is the property you are
+buying - the only copy of the key is sealed to somebody else - and it means
+keeping your own copy takes saying so:
+
+```bash
+scripts/clip-to-noise -r alex -r me    # if you want to be able to look again
 ```
 
 Two details in there are not incidental:
@@ -306,10 +361,17 @@ that the way you would treat any other secret on screen.
 `scripts/raycast/` holds two Raycast script commands wrapping the clipboard
 scripts, so the round trip runs from a hotkey instead of a terminal:
 
-| Command | Wraps |
-| --- | --- |
-| **Image to Noise** | `clip-to-noise` |
-| **Image from Noise** | `clip-from-noise` |
+| Command | Wraps | Argument |
+| --- | --- | --- |
+| **Image to Noise** | `clip-to-noise` | recipient, optional |
+| **Image from Noise** | `clip-from-noise` | key or passphrase, optional |
+
+**Image to Noise** takes a recipient. Left empty it behaves as it always did:
+a shared key, minted if there is none, printed once. Type a name filed under
+`~/.config/image-noise/recipients` and the image is sealed to that person
+instead, with nothing to hand over and no way for this machine to open it
+again. A short name is the point - a hotkey is no place to paste eighty
+characters of base64.
 
 Build once first, so the first press of the hotkey is not a compile:
 
@@ -331,9 +393,9 @@ Three things about the wrappers are deliberate.
 
 **They run in `fullOutput` mode.** The interesting output is never the last
 line. Going out, a minted key is printed once and is the only copy a recipient
-can be handed; coming back, the fingerprints are the only thing separating a
-wrong key from a file that could not be opened at all. `compact` shows one line
-and would hide both.
+can be handed - and when sealing, the line saying which recipients it went to is
+the only confirmation you sealed to who you meant. `compact` shows one line and
+would hide either.
 
 **They fold stderr into stdout.** The clipboard scripts report on stderr to keep
 their pipes clean, and Raycast displays stdout.
@@ -354,11 +416,17 @@ re-paste that same reference next week is not.
 
 ### Handing an image to someone else
 
-**Image from Noise** takes an optional key, masked as it is typed. Left empty it
-behaves as it always did and resolves the key from the keychain. Filled in, it is
-the only way anyone who did not make the image can restore it: their keychain
-holds nothing under its key-id, and there is no tty here for `prompt_key` to fall
-back to.
+**Image from Noise** takes an optional secret, masked as it is typed. Left empty
+it behaves as it always did and resolves the key from the keychain, or the
+private key for a sealed image. Filled in, it is the only way anyone who did not
+make the image can restore it: their keychain holds nothing under its key-id, and
+there is no tty here to fall back to.
+
+It is one field for two kinds of secret because there is no third. A shared image
+wants the key; an image sealed to a public key wants the passphrase for the
+private key that opens it. Which one it is depends on the image, and
+`clip-from-noise` reads that off the header rather than guessing - both are
+exported, and whichever does not apply is never looked at.
 
 A key worth having is too long to type, so it arrives by being pasted - and that
 replaces whatever was on the clipboard, which cannot then also hold the noise.

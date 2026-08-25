@@ -12,9 +12,11 @@
 # `-i` reads the noise from a path instead, for when the clipboard is needed for
 # something else. It is the same bytes off the same disk; only the route differs.
 #
-# A file written by clip-to-noise carries its key-id in the name, which is
-# enough to find the key it was made with in the keychain, whichever way it
-# arrives.
+# How to open it is read off the noise itself rather than guessed. An image
+# sealed to a public key is opened with a private key - $IMAGE_NOISE_IDENTITY,
+# or ~/.ssh/id_ed25519 - and nothing else will do. Otherwise it is the shared
+# key it always was, and a file written by clip-to-noise carries its key-id in
+# the name, which is enough to find that key in the keychain.
 #
 # Usage: clip-from-noise [-i <path>] [-o <path>]
 
@@ -26,7 +28,7 @@ while [ $# -gt 0 ]; do
     case "$1" in
         -i|--input) in_path="${2:?-i needs a path}"; shift ;;
         -o|--output) out="${2:?-o needs a path}"; shift ;;
-        -h|--help) sed -n '2,19p' "$0" | cut -c3-; exit 0 ;;
+        -h|--help) sed -n '2,22p' "$0" | cut -c3-; exit 0 ;;
         *) echo "${0##*/}: unknown option $1" >&2; exit 1 ;;
     esac
     shift
@@ -34,38 +36,54 @@ done
 
 require_tools
 
-# Where the noise comes from, and the name a key-id is read off. A path given
-# with -i is read straight off disk; the clipboard matches that only when it
-# holds a file reference, which clipimg also reads off disk.
+# The noise has to be readable twice - once to ask how it wants to be opened,
+# once to open it - so it ends up as a path either way. Coming off the
+# clipboard that means a scratch copy, which costs nothing the default forward
+# mode does not already: noise on disk is the encrypted thing.
+#
+# `name_src` keeps the name the noise arrived under, which is where a key-id
+# lives. A scratch copy has no such name, so the two are tracked separately.
 if [ -n "$in_path" ]; then
     [ -f "$in_path" ] || { echo "${0##*/}: no such file: $in_path" >&2; exit 1; }
     src=$in_path
-    read_noise() { cat -- "$in_path"; }
+    name_src=$in_path
 else
-    src=$("$bin_dir/clipimg" path 2>/dev/null) || src=""
-    read_noise() { "$bin_dir/clipimg" paste; }
+    name_src=$("$bin_dir/clipimg" path 2>/dev/null) || name_src=""
+    src=$(mktemp "${TMPDIR:-/tmp}/image-noise-in.XXXXXX")
+    trap 'rm -f "$src"' EXIT
+    "$bin_dir/clipimg" paste > "$src"
 fi
 
-# The trailing hex group in a clip-to-noise filename is the key-id of the key
-# that made it. Absent (a bitmap, a renamed file, noise from somewhere else) it
-# stays empty and the key is resolved the same way it always was.
-key_id=$(printf '%s\n' "${src##*/}" | sed -n 's/.*-\([0-9a-f]\{16\}\)\.png$/\1/p')
+# Asking the header costs no key and cannot prompt for the wrong secret.
+if ! keying=$(noise_keying "$src"); then
+    echo "${0##*/}: that is not a noise image, so there is nothing to restore." >&2
+    exit 1
+fi
 
-load_key_for_id "$key_id"
+if [ "$keying" = x25519 ]; then
+    identity_args
+    key_flags=("${identity_flags[@]}")
+else
+    # The trailing hex group in a clip-to-noise filename is the key-id of the
+    # key that made it. Absent (a bitmap, a renamed file, noise from somewhere
+    # else) it stays empty and the key is resolved the way it always was.
+    key_id=$(printf '%s\n' "${name_src##*/}" | sed -n 's/.*-\([0-9a-f]\{16\}\)\.png$/\1/p')
+    load_key_for_id "$key_id"
+    key_flags=(--key-env "$key_var")
+fi
 
 if [ -n "$out" ]; then
-    read_noise | "$bin_dir/from-noise" --key-env "$key_var" - -o "$out"
+    "$bin_dir/from-noise" "${key_flags[@]}" "$src" -o "$out"
     "$bin_dir/clipimg" copy "$out"
     echo "clipboard now holds the restored image (also at $out)" >&2
 else
     # The restored image is the plaintext, so it goes straight to the clipboard
     # without ever being written to disk.
-    read_noise \
-        | "$bin_dir/from-noise" --key-env "$key_var" - -o - \
+    "$bin_dir/from-noise" "${key_flags[@]}" "$src" -o - \
         | "$bin_dir/clipimg" copy -
     echo "clipboard now holds the restored image" >&2
 fi
 
-echo "compare the fingerprints above: matching 'noise' lines mean the noise" >&2
-echo "arrived intact, and 'restored' matching the original 'source' means the" >&2
-echo "key was right." >&2
+# Getting this far means the authentication tag checked out, which is the whole
+# answer: the file is the one that was written, and the key was the right one.
+# The fingerprints above are there to read, not to rely on.
