@@ -15,7 +15,8 @@ comptime {
 pub const salt_length = 16;
 pub const mac_length = 32;
 
-pub const Master = [32]u8;
+pub const Master_length = 32;
+pub const Master = [Master_length]u8;
 pub const Salt = [salt_length]u8;
 pub const Mac = [mac_length]u8;
 
@@ -40,6 +41,10 @@ pub const KdfId = enum(u8) {
     /// A passphrase. Argon2id makes each guess expensive, which is the only
     /// thing standing between a human-memorable key and a GPU.
     argon2id = 1,
+    /// The master is random and travels sealed to one or more X25519 public
+    /// keys in the header. Nothing is derived from a supplied key at all - it
+    /// is unwrapped with a private key instead.
+    x25519 = 2,
     _,
 };
 
@@ -69,7 +74,7 @@ pub const DerivedKeys = struct {
 
 pub const Direction = enum { to_noise, from_noise };
 
-pub const MasterError = error{ RawKeyLength, UnsupportedKdf } || std.crypto.pwhash.KdfError;
+pub const MasterError = error{ RawKeyLength, UnsupportedKdf, IdentityRequired } || std.crypto.pwhash.KdfError;
 
 /// Turns whatever the caller supplied into a master key. Everything else in the
 /// schedule hangs off this one value.
@@ -84,6 +89,8 @@ pub fn deriveMaster(allocator: Allocator, io: Io, key: []const u8, kdf: KdfId) M
             try argon2.kdf(allocator, &master, key, argon2_salt, argon2_params, .argon2id, io);
             return master;
         },
+        // Not derived from anything the caller typed: see `recipient.open`.
+        .x25519 => return error.IdentityRequired,
         _ => return error.UnsupportedKdf,
     }
 }

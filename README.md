@@ -9,6 +9,9 @@ Every noise image carries its own random salt and an authentication tag, so a
 wrong key - or a file altered anywhere along the way - is refused outright
 rather than restored into something that merely looks wrong.
 
+Images can be sealed to an `ssh-ed25519` public key instead of a shared
+passphrase, so sending one to somebody costs them nothing to set up.
+
 ## Requirements
 
 - [Zig 0.16.x](https://ziglang.org/download/)
@@ -76,6 +79,8 @@ Provide **exactly one** of:
 | `--key-hex <hex>` | 64 hex digits used as the 32-byte master key directly, with or without a `0x` prefix. |
 | `--key-env <name>` | Read the passphrase from an environment variable. |
 
+Or none of them - see [Sending to someone else's key](#sending-to-someone-elses-key).
+
 Prefer `--key-env` for anything scripted. A key passed as `--key` sits in the
 process's argv, where any other process on the machine can read it out of `ps`,
 and a `--key-file` leaves the key on disk. The environment is the one channel
@@ -93,6 +98,56 @@ a GPU that would otherwise test billions of guesses a second. `--key-hex` skips
 the stretching, because 32 random bytes have nothing left to guess. Which one an
 image was made with is recorded in the image, so the inverse does not have to be
 told again.
+
+### Sending to someone else's key
+
+A shared passphrase has to reach the other person somehow, and that is the part
+with no good answer. The alternative is to seal the image to a public key, which
+they can hand out in the clear:
+
+```bash
+# they send you this once - it is already on their machine
+cat ~/.ssh/id_ed25519.pub
+
+# you seal to it
+to-noise --recipient friend.pub scan.png -o noise.png
+
+# they open it
+from-noise --identity ~/.ssh/id_ed25519 noise.png -o scan.png
+```
+
+`--recipient` takes either the key itself or a path to a file of them, because
+both are what actually happens - one gets pasted, the other gets saved. An
+`authorized_keys` works: lines that are not `ssh-ed25519` are skipped rather than
+refused. Repeat the flag to seal to several people, up to 32:
+
+```bash
+to-noise -r alice.pub -r bob.pub -r ~/team-keys.txt scan.png
+```
+
+Each recipient gets their own sealed copy of the key, and no stanza says who it
+belongs to - opening one is a trial decryption, so the image does not carry a
+list of who can read it. `--identity` can be repeated too, and each is tried in
+turn.
+
+**Only `ssh-ed25519`.** RSA would need OAEP, which Zig's standard library keeps
+inside its certificate machinery rather than exposing for encryption, and ECDSA
+keys cannot do this at all - the same two exclusions age settles on. If a friend
+sends anything else, ask for `ssh-keygen -t ed25519`.
+
+**A passphrase-protected private key needs its passphrase in the environment.**
+There is no prompt here, deliberately: the clipboard scripts already own that
+job, and Raycast has no terminal to ask on.
+
+```bash
+IDENTITY_PASSPHRASE=... from-noise -i ~/.ssh/id_ed25519 \
+    --identity-passphrase-env IDENTITY_PASSPHRASE noise.png
+```
+
+Ed25519 signing keys live on the Edwards curve and encryption wants Montgomery,
+so both halves are converted with the standard birational map. Using one key to
+both log in and decrypt is a mild abuse of key separation; it is also what makes
+this cost your friends nothing, and it is what age does too.
 
 ### Verifying a round trip
 
@@ -335,12 +390,13 @@ no file, so there is no wrong image to mistake for a right one.
 The key never travels with the image. The salt does, in the header rows, and both directions re-derive the same material from the key plus that salt plus the picture's dimensions.
 
 ```
-passphrase                        32 random bytes (--key-hex)
-    │                                      │
-    ▼                                      │
-Argon2id  (19 MiB, t=2)                    │
-    │                                      │
-    └──────────────► master key ◄──────────┘
+passphrase           32 random bytes        sealed to a public key
+    │                  (--key-hex)            (--recipient)
+    ▼                       │                       │
+Argon2id                    │            random master, X25519-wrapped
+(19 MiB, t=2)               │              into the header, one copy
+    │                       │                   per recipient
+    └───────────────► master key ◄──────────────────┘
                           │
               + per-image salt + dimensions
                           │
@@ -353,6 +409,9 @@ Argon2id  (19 MiB, t=2)                    │
 
 **Forward (`to-noise`)**
 
+0. In recipient mode, draw a random master key and seal a copy of it to each
+   recipient with an ephemeral Diffie-Hellman. Everything below is unchanged by
+   that: the master is a master however it was reached.
 1. Draw a fresh 16-byte salt and derive the schedule from it.
 2. Shuffle pixels with a keyed permutation.
 3. XOR the packed RGB buffer with a ChaCha20 keystream.
@@ -373,7 +432,9 @@ The permutation is not what provides secrecy; ChaCha20 is. It is what makes the 
 
 The byte stream is a contract: a noise image is only useful if a later build can still invert it. `cipher.zig` carries known-answer tests that pin the key schedule, the pixel permutation and the keystream, so any change to them fails the test suite instead of quietly stranding existing noise images.
 
-There are two formats. **v2** is what `to-noise` writes: header rows, a salt and a tag. **v1** is everything written before those existed - no header, no salt, no authentication. `from-noise` recognises a v1 image by the absence of the magic at the start of the pixels, opens it with the old unstretched key schedule, and says so:
+There are two formats. **v2** is what `to-noise` writes: header rows, a salt and a tag. **v1** is everything written before those existed - no header, no salt, no authentication.
+
+Sealing to recipients did not move the version. It adds a key-derivation id and a count byte followed by one 80-byte stanza each, all of it after the tag field and so covered by the tag. A build too old to know that id refuses the image on the id alone, which is the error it should give anyway, and bumping the version would have stranded passphrase images that did not change at all. `from-noise` recognises a v1 image by the absence of the magic at the start of the pixels, opens it with the old unstretched key schedule, and says so:
 
 ```
 warning: this is a v1 noise image - no salt, no authentication.
@@ -408,7 +469,12 @@ Still true, and worth knowing before trusting it with anything that matters:
   question entirely.
 - **Nothing about the sender is authenticated.** The tag proves the file was not
   altered after it was made. It says nothing about who made it: anyone holding
-  the key can produce a valid image.
+  the key - or, in recipient mode, anyone at all, since the public key is
+  public - can produce a valid image addressed to you. Public-key encryption
+  changes who can read something, not who can write it.
+- **A sealed image is only as private as the private key.** `--identity` reads
+  the key file directly and never consults `ssh-agent`, so an already-unlocked
+  agent does not help and the passphrase has to be supplied each time.
 - **The metadata is in the clear.** Dimensions, file size, and - if you keep the
   clipboard scripts' naming - a `key-id` in the filename that links every image
   made with the same key.

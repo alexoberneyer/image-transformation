@@ -4,6 +4,8 @@
 test {
     _ = @import("cipher.zig");
     _ = @import("container.zig");
+    _ = @import("recipient.zig");
+    _ = @import("ssh.zig");
     _ = @import("png.zig");
     _ = @import("ppm.zig");
     _ = @import("image.zig");
@@ -16,6 +18,7 @@ const container = @import("container.zig");
 const image = @import("image.zig");
 const png = @import("png.zig");
 const ppm = @import("ppm.zig");
+const recipient = @import("recipient.zig");
 const sample = @import("generate_sample.zig");
 
 const testing = std.testing;
@@ -43,7 +46,7 @@ fn encrypt(allocator: std.mem.Allocator, src: image.Image, master: cipher.Master
         .height = src.height,
         .salt = salt,
         .mac = undefined,
-    }, keys);
+    }, &.{}, keys);
 }
 
 /// The whole `from-noise` side, tag check included.
@@ -71,7 +74,7 @@ test "file roundtrip through noise and inverse" {
         defer noise.deinit();
         // The container is taller than the picture by exactly its header rows.
         try testing.expectEqual(original.width, noise.width);
-        try testing.expectEqual(original.height + try container.rowsFor(original.width), noise.height);
+        try testing.expectEqual(original.height + try container.rowsFor(original.width, container.fixed_header_bytes), noise.height);
 
         var carried = try reencode(allocator, noise, format);
         defer carried.deinit();
@@ -235,6 +238,153 @@ test "v1 noise is still readable" {
 
     try cipher.transform(allocator, legacy.rgb, 24, 18, keys, .from_noise);
     try testing.expectEqualSlices(u8, original.rgb, legacy.rgb);
+}
+
+/// The `to-noise` side of recipient mode: a random master, sealed once per
+/// recipient, and never typed by anyone.
+fn seal(
+    allocator: std.mem.Allocator,
+    src: image.Image,
+    to: []const recipient.PublicKey,
+) !image.Image {
+    var master: cipher.Master = undefined;
+    try io.randomSecure(&master);
+    var salt: cipher.Salt = undefined;
+    try io.randomSecure(&salt);
+
+    const stanzas = try allocator.alloc(recipient.Stanza, to.len);
+    defer allocator.free(stanzas);
+    for (stanzas, to) |*stanza, key| stanza.* = try recipient.seal(io, master, key);
+
+    const keys = cipher.deriveKeys(master, salt, src.width, src.height);
+    return container.wrap(allocator, io, src, .{
+        .kdf = .x25519,
+        .width = src.width,
+        .height = src.height,
+        .salt = salt,
+        .mac = undefined,
+        .recipient_count = @intCast(stanzas.len),
+    }, stanzas, keys);
+}
+
+/// The `from-noise` side: trial-decrypt every stanza, then verify and unwrap.
+fn unseal(
+    allocator: std.mem.Allocator,
+    noise: image.Image,
+    identity: recipient.Identity,
+) !image.Image {
+    const header = try container.parseHeader(noise.rgb);
+    var i: usize = 0;
+    const master = while (i < header.recipient_count) : (i += 1) {
+        if (recipient.open(container.stanzaAt(noise.rgb, i), identity)) |m| break m else |_| {}
+    } else return error.NotForThisIdentity;
+
+    const keys = cipher.deriveKeys(master, header.salt, header.width, header.height);
+    return container.unwrap(allocator, noise, header, keys);
+}
+
+test "an image sealed to a public key round-trips through a file" {
+    const allocator = testing.allocator;
+    const identity = recipient.Identity.generate(io);
+
+    var original = try image.Image.init(allocator, 48, 32);
+    defer original.deinit();
+    sample.drawSample(original);
+
+    var noise = try seal(allocator, original, &.{identity.public_key});
+    defer noise.deinit();
+
+    // Through a real PNG and back, the way it would actually travel.
+    var carried = try reencode(allocator, noise, .png);
+    defer carried.deinit();
+
+    var restored = try unseal(allocator, carried, identity);
+    defer restored.deinit();
+    try testing.expectEqual(original.width, restored.width);
+    try testing.expectEqual(original.height, restored.height);
+    try testing.expectEqualSlices(u8, original.rgb, restored.rgb);
+}
+
+test "a sealed image is opaque to every other identity" {
+    const allocator = testing.allocator;
+    const mine = recipient.Identity.generate(io);
+    const theirs = recipient.Identity.generate(io);
+
+    var original = try image.Image.init(allocator, 32, 24);
+    defer original.deinit();
+    sample.drawSample(original);
+
+    var noise = try seal(allocator, original, &.{mine.public_key});
+    defer noise.deinit();
+
+    try testing.expectError(error.NotForThisIdentity, unseal(allocator, noise, theirs));
+}
+
+test "every recipient of a multi-recipient image can open it" {
+    const allocator = testing.allocator;
+    const a = recipient.Identity.generate(io);
+    const b = recipient.Identity.generate(io);
+    const c = recipient.Identity.generate(io);
+    const stranger = recipient.Identity.generate(io);
+
+    var original = try image.Image.init(allocator, 40, 30);
+    defer original.deinit();
+    sample.drawSample(original);
+
+    var noise = try seal(allocator, original, &.{ a.public_key, b.public_key, c.public_key });
+    defer noise.deinit();
+
+    for ([_]recipient.Identity{ a, b, c }) |identity| {
+        var restored = try unseal(allocator, noise, identity);
+        defer restored.deinit();
+        try testing.expectEqualSlices(u8, original.rgb, restored.rgb);
+    }
+    try testing.expectError(error.NotForThisIdentity, unseal(allocator, noise, stranger));
+}
+
+test "a stanza cannot be swapped in from another image" {
+    // The stanzas sit after the MAC field, so the tag covers them. Lifting one
+    // out of an image addressed to you and pasting it into somebody else's has
+    // to fail, or the tag would be covering less than it looks like it does.
+    const allocator = testing.allocator;
+    const mine = recipient.Identity.generate(io);
+
+    var original = try image.Image.init(allocator, 40, 30);
+    defer original.deinit();
+    sample.drawSample(original);
+
+    var target = try seal(allocator, original, &.{recipient.Identity.generate(io).public_key});
+    defer target.deinit();
+    var ours = try seal(allocator, original, &.{mine.public_key});
+    defer ours.deinit();
+
+    // Graft our stanza into the image sealed to someone else.
+    const at = container.recipient_count_offset + 1;
+    @memcpy(
+        target.rgb[at..][0..recipient.stanza_bytes],
+        ours.rgb[at..][0..recipient.stanza_bytes],
+    );
+
+    // The stanza itself still opens - it is ours - but it yields a master that
+    // does not match the tag over this image, so nothing is decrypted.
+    try testing.expectError(error.AuthenticationFailed, unseal(allocator, target, mine));
+}
+
+test "sealed and passphrase images are told apart by the header" {
+    const allocator = testing.allocator;
+    var original = try image.Image.init(allocator, 32, 24);
+    defer original.deinit();
+    sample.drawSample(original);
+
+    var sealed = try seal(allocator, original, &.{recipient.Identity.generate(io).public_key});
+    defer sealed.deinit();
+    var shared = try encrypt(allocator, original, [_]u8{0x6b} ** 32);
+    defer shared.deinit();
+
+    try testing.expectEqual(cipher.KdfId.x25519, (try container.parseHeader(sealed.rgb)).kdf);
+    try testing.expectEqual(cipher.KdfId.argon2id, (try container.parseHeader(shared.rgb)).kdf);
+    // A sealed image carries a stanza, so it needs the taller header.
+    try testing.expect(sealed.height > shared.height);
 }
 
 test "save and load round-trip through the filesystem" {
