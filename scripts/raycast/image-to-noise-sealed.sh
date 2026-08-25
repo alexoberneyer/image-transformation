@@ -8,7 +8,7 @@
 # Optional parameters:
 # @raycast.icon 🔒
 # @raycast.packageName Image Noise
-# @raycast.argument1 {"type": "dropdown", "placeholder": "recipient", "optional": true, "data": [{"title": "(none saved yet)", "value": ""}]}
+# @raycast.argument1 {"type": "dropdown", "placeholder": "recipient", "optional": true, "data": [{"title": "me", "value": "me"}]}
 # @raycast.argument2 { "type": "text", "placeholder": "more recipients (optional)", "optional": true }
 
 # Documentation:
