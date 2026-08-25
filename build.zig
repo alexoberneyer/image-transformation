@@ -36,9 +36,11 @@ pub fn build(b: *std.Build) void {
     for (tools) |tool| {
         const exe = b.addExecutable(.{
             .name = tool.name,
-            .root_source_file = b.path(tool.source),
-            .target = target,
-            .optimize = optimize,
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(tool.source),
+                .target = target,
+                .optimize = optimize,
+            }),
         });
         b.installArtifact(exe);
 
@@ -52,9 +54,11 @@ pub fn build(b: *std.Build) void {
     // scanline loops), so run them in the selected mode rather than only in
     // Debug: `zig build test -Doptimize=ReleaseFast` is a meaningful check.
     const unit_tests = b.addTest(.{
-        .root_source_file = b.path("src/tests.zig"),
-        .target = target,
-        .optimize = optimize,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/tests.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
     });
     b.step("test", "Run unit tests").dependOn(&b.addRunArtifact(unit_tests).step);
 }

@@ -82,13 +82,13 @@ pub fn encode(allocator: Allocator, width: u32, height: u32, rgb: []const u8) ![
     const n = try cipher.pixelCount(width, height);
     if (rgb.len != n * 3) return error.InvalidImageSize;
 
-    var out = std.ArrayList(u8).init(allocator);
-    errdefer out.deinit();
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
     // "P6\n<w> <h>\n255\n" is at most 26 bytes for u32 dimensions.
-    try out.ensureTotalCapacityPrecise(rgb.len + 26);
-    try out.writer().print("P6\n{d} {d}\n255\n", .{ width, height });
+    try out.ensureTotalCapacityPrecise(allocator, rgb.len + 26);
+    try out.print(allocator, "P6\n{d} {d}\n255\n", .{ width, height });
     out.appendSliceAssumeCapacity(rgb);
-    return out.toOwnedSlice();
+    return out.toOwnedSlice(allocator);
 }
 
 test "ppm encode/decode roundtrip" {

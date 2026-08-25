@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+#
+# Turns the image on the clipboard into keyed noise.
+#
+# The noise is written to a file and the clipboard is left holding a *reference*
+# to that file, so pasting into a chat or a document attaches the PNG losslessly
+# instead of inlining a bitmap the receiving app is free to re-encode. `--bitmap`
+# puts the pixels on the clipboard instead, for the cases where an inline paste
+# is what you actually want.
+#
+# Usage: clip-to-noise [--bitmap] [-o <path>]
+
+source "$(dirname -- "${BASH_SOURCE[0]}")/common.sh"
+
+bitmap=0
+out=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --bitmap) bitmap=1 ;;
+        -o|--output) out="${2:?-o needs a path}"; shift ;;
+        -h|--help) sed -n '2,12p' "$0" | cut -c3-; exit 0 ;;
+        *) echo "${0##*/}: unknown option $1" >&2; exit 1 ;;
+    esac
+    shift
+done
+
+require_tools
+load_key
+
+# `--normalize` forces the clipboard image to 8-bit RGB with no alpha and no
+# colour profile. Screenshots and images copied out of a browser arrive in
+# shapes the transform rejects outright, and it is safe here: whatever pixels
+# come out of it are simply what gets encrypted.
+if [ "$bitmap" = 1 ]; then
+    # Nothing touches the disk in this mode.
+    "$bin_dir/clipimg" paste --normalize \
+        | "$bin_dir/to-noise" --key-env "$key_var" - -o - \
+        | "$bin_dir/clipimg" copy -
+    echo "clipboard now holds the noise as a bitmap" >&2
+    exit 0
+fi
+
+if [ -z "$out" ]; then
+    tmp=${TMPDIR:-/tmp}
+    dir=${IMAGE_NOISE_DIR:-${tmp%/}/image-noise}
+    mkdir -p "$dir"
+    out="$dir/noise-$(date +%Y%m%d-%H%M%S).png"
+fi
+
+# Only the noise is ever written out; the original pixels stay in the pipe.
+"$bin_dir/clipimg" paste --normalize \
+    | "$bin_dir/to-noise" --key-env "$key_var" - -o "$out"
+
+"$bin_dir/clipimg" copy-file "$out"
+echo "clipboard now holds a reference to $out" >&2

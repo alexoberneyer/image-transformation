@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+#
+# Reconstructs the original image from the noise on the clipboard and leaves the
+# result on the clipboard.
+#
+# The noise is never normalized on the way in: redrawing it through a colour
+# space would rewrite the exact bytes the inverse depends on. If the clipboard
+# holds a file reference, those bytes are read straight off disk, which is the
+# only path guaranteed to be lossless - a noise image that has been pasted into
+# an app and copied back out has usually been re-encoded and cannot be restored.
+#
+# Usage: clip-from-noise [-o <path>]
+
+source "$(dirname -- "${BASH_SOURCE[0]}")/common.sh"
+
+out=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -o|--output) out="${2:?-o needs a path}"; shift ;;
+        -h|--help) sed -n '2,13p' "$0" | cut -c3-; exit 0 ;;
+        *) echo "${0##*/}: unknown option $1" >&2; exit 1 ;;
+    esac
+    shift
+done
+
+require_tools
+load_key
+
+if [ -n "$out" ]; then
+    "$bin_dir/clipimg" paste | "$bin_dir/from-noise" --key-env "$key_var" - -o "$out"
+    "$bin_dir/clipimg" copy "$out"
+    echo "clipboard now holds the restored image (also at $out)" >&2
+else
+    # The restored image is the plaintext, so it goes straight to the clipboard
+    # without ever being written to disk.
+    "$bin_dir/clipimg" paste \
+        | "$bin_dir/from-noise" --key-env "$key_var" - -o - \
+        | "$bin_dir/clipimg" copy -
+    echo "clipboard now holds the restored image" >&2
+fi
+
+echo "compare the fingerprints above: matching 'noise' lines mean the noise" >&2
+echo "arrived intact, and 'restored' matching the original 'source' means the" >&2
+echo "key was right." >&2

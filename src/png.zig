@@ -1,5 +1,6 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const flate = std.compress.flate;
 const cipher = @import("cipher.zig");
 
 pub const RgbImage = struct {
@@ -68,8 +69,8 @@ pub fn decode(allocator: Allocator, data: []const u8) !RgbImage {
     var offset: usize = signature.len;
     var header: ?Header = null;
     var saw_iend = false;
-    var idat = std.ArrayList(u8).init(allocator);
-    defer idat.deinit();
+    var idat: std.ArrayList(u8) = .empty;
+    defer idat.deinit(allocator);
 
     while (offset < data.len) {
         if (data.len - offset < 12) return error.InvalidPng;
@@ -90,7 +91,7 @@ pub fn decode(allocator: Allocator, data: []const u8) !RgbImage {
         } else if (header == null) {
             return error.InvalidPng; // IHDR must come first.
         } else if (std.mem.eql(u8, typ, "IDAT")) {
-            try idat.appendSlice(chunk);
+            try idat.appendSlice(allocator, chunk);
         } else if (std.mem.eql(u8, typ, "IEND")) {
             saw_iend = true;
             break;
@@ -113,13 +114,17 @@ pub fn decode(allocator: Allocator, data: []const u8) !RgbImage {
     // decompression bomb can cost us.
     const raw = try allocator.alloc(u8, hdr.raw_len);
     defer allocator.free(raw);
-    var compressed = std.io.fixedBufferStream(idat.items);
-    var raw_stream = std.io.fixedBufferStream(raw);
-    std.compress.zlib.decompress(compressed.reader(), raw_stream.writer()) catch |err| switch (err) {
-        error.NoSpaceLeft => {}, // More data than the header promised; ignore the tail.
+    var compressed: std.Io.Reader = .fixed(idat.items);
+    var raw_stream: std.Io.Writer = .fixed(raw);
+    // An empty history window makes the decoder resolve back-references
+    // against `raw` itself, which already holds the whole output.
+    var no_window: [0]u8 = undefined;
+    var inflate: flate.Decompress = .init(&compressed, .zlib, &no_window);
+    _ = inflate.reader.streamRemaining(&raw_stream) catch |err| switch (err) {
+        error.WriteFailed => {}, // More data than the header promised; ignore the tail.
         else => return error.InvalidPng,
     };
-    if (raw_stream.pos != hdr.raw_len) return error.InvalidPng;
+    if (raw_stream.end != hdr.raw_len) return error.InvalidPng;
 
     const rgb = try allocator.alloc(u8, (try cipher.pixelCount(hdr.width, hdr.height)) * 3);
     errdefer allocator.free(rgb);
@@ -238,12 +243,65 @@ fn worthCompressing(data: []const u8) bool {
     const probe_len: usize = @min(data.len, max_probe);
     const probe = data[(data.len - probe_len) / 2 ..][0..probe_len];
 
-    var counter = std.io.countingWriter(std.io.null_writer);
-    var reader = std.io.fixedBufferStream(probe);
+    var discard_buf: [64]u8 = undefined;
+    var counter: std.Io.Writer.Discarding = .init(&discard_buf);
+    var window: [flate.max_window_len]u8 = undefined;
     // If the probe itself fails, fall back to compressing: never worse than
     // storing by more than the time it takes.
-    std.compress.zlib.compress(reader.reader(), counter.writer(), .{ .level = .fast }) catch return true;
-    return counter.bytes_written * 100 < @as(u64, probe_len) * 98;
+    var comp = flate.Compress.init(&counter.writer, &window, .zlib, .level_1) catch return true;
+    comp.writer.writeAll(probe) catch return true;
+    comp.finish() catch return true;
+    return counter.fullCount() * 100 < @as(u64, probe_len) * 98;
+}
+
+/// Deflates `data` into a zlib stream.
+fn deflateZlib(allocator: Allocator, data: []const u8) ![]u8 {
+    var out: std.Io.Writer.Allocating = try .initCapacity(allocator, data.len / 4 + 64);
+    errdefer out.deinit();
+
+    const window = try allocator.alloc(u8, flate.max_window_len);
+    defer allocator.free(window);
+    var comp = try flate.Compress.init(&out.writer, window, .zlib, .level_1);
+    try comp.writer.writeAll(data);
+    try comp.finish();
+
+    var list = out.toArrayList();
+    return list.toOwnedSlice(allocator);
+}
+
+/// Wraps `data` in a zlib stream of stored (uncompressed) deflate blocks.
+///
+/// std only exposes this through a private `finish`, and the format is four
+/// fields wide, so it is written out here: a zlib header, a run of stored
+/// blocks carrying the payload verbatim, and an Adler-32 footer.
+fn storeZlib(allocator: Allocator, data: []const u8) ![]u8 {
+    const max_block = 65535;
+    const blocks = data.len / max_block + 1;
+    var out = try std.ArrayList(u8).initCapacity(allocator, 2 + data.len + blocks * 5 + 4);
+    errdefer out.deinit(allocator);
+
+    // CINFO=7, CM=8 (deflate), FLEVEL=0, FDICT=0, and an FCHECK that makes the
+    // two header bytes a multiple of 31.
+    out.appendSliceAssumeCapacity(&.{ 0x78, 0x01 });
+
+    var offset: usize = 0;
+    while (true) {
+        const len: u16 = @intCast(@min(max_block, data.len - offset));
+        const final = offset + len == data.len;
+        var header: [5]u8 = undefined;
+        header[0] = @intFromBool(final); // BFINAL, with BTYPE=00 (stored)
+        std.mem.writeInt(u16, header[1..3], len, .little);
+        std.mem.writeInt(u16, header[3..5], ~len, .little);
+        out.appendSliceAssumeCapacity(&header);
+        out.appendSliceAssumeCapacity(data[offset..][0..len]);
+        offset += len;
+        if (final) break;
+    }
+
+    var adler: [4]u8 = undefined;
+    std.mem.writeInt(u32, &adler, std.hash.Adler32.hash(data), .big);
+    out.appendSliceAssumeCapacity(&adler);
+    return out.toOwnedSlice(allocator);
 }
 
 pub fn encode(allocator: Allocator, width: u32, height: u32, rgb: []const u8) ![]u8 {
@@ -261,27 +319,18 @@ pub fn encode(allocator: Allocator, width: u32, height: u32, rgb: []const u8) ![
         @memcpy(filtered[row + 1 ..][0..stride], rgb[y * stride ..][0..stride]);
     }
 
-    const compress = worthCompressing(rgb);
-    var compressed = std.ArrayList(u8).init(allocator);
-    defer compressed.deinit();
-    // Stored blocks add 5 bytes per 64 KiB; a rough guess is enough to keep
-    // the common case from repeatedly reallocating a large buffer.
-    try compressed.ensureTotalCapacityPrecise(
-        if (compress) filtered.len / 4 + 64 else filtered.len + filtered.len / 8192 + 64,
-    );
-    var input = std.io.fixedBufferStream(filtered);
-    if (compress) {
-        try std.compress.zlib.compress(input.reader(), compressed.writer(), .{ .level = .fast });
-    } else {
-        try std.compress.zlib.store.compress(input.reader(), compressed.writer());
-    }
+    const compressed = if (worthCompressing(rgb))
+        try deflateZlib(allocator, filtered)
+    else
+        try storeZlib(allocator, filtered);
+    defer allocator.free(compressed);
 
     const ihdr_len = 13;
     var out = try std.ArrayList(u8).initCapacity(
         allocator,
-        signature.len + (12 + ihdr_len) + (12 + compressed.items.len) + 12,
+        signature.len + (12 + ihdr_len) + (12 + compressed.len) + 12,
     );
-    errdefer out.deinit();
+    errdefer out.deinit(allocator);
     out.appendSliceAssumeCapacity(&signature);
 
     var ihdr: [ihdr_len]u8 = undefined;
@@ -292,24 +341,24 @@ pub fn encode(allocator: Allocator, width: u32, height: u32, rgb: []const u8) ![
     ihdr[10] = 0; // compression: deflate
     ihdr[11] = 0; // filter method: adaptive
     ihdr[12] = 0; // interlace: none
-    try writeChunk(&out, "IHDR", &ihdr);
-    try writeChunk(&out, "IDAT", compressed.items);
-    try writeChunk(&out, "IEND", &.{});
-    return out.toOwnedSlice();
+    try writeChunk(allocator, &out, "IHDR", &ihdr);
+    try writeChunk(allocator, &out, "IDAT", compressed);
+    try writeChunk(allocator, &out, "IEND", &.{});
+    return out.toOwnedSlice(allocator);
 }
 
-fn writeChunk(out: *std.ArrayList(u8), typ: *const [4]u8, data: []const u8) !void {
+fn writeChunk(allocator: Allocator, out: *std.ArrayList(u8), typ: *const [4]u8, data: []const u8) !void {
     var len_buf: [4]u8 = undefined;
     std.mem.writeInt(u32, &len_buf, @intCast(data.len), .big);
-    try out.appendSlice(&len_buf);
-    try out.appendSlice(typ);
-    try out.appendSlice(data);
+    try out.appendSlice(allocator, &len_buf);
+    try out.appendSlice(allocator, typ);
+    try out.appendSlice(allocator, data);
     var crc = std.hash.crc.Crc32.init();
     crc.update(typ);
     crc.update(data);
     var crc_buf: [4]u8 = undefined;
     std.mem.writeInt(u32, &crc_buf, crc.final(), .big);
-    try out.appendSlice(&crc_buf);
+    try out.appendSlice(allocator, &crc_buf);
 }
 
 // ---------------------------------------------------------------------------
@@ -325,21 +374,19 @@ fn buildPng(
     color_type: u8,
     raw: []const u8,
 ) ![]u8 {
-    var compressed = std.ArrayList(u8).init(allocator);
-    defer compressed.deinit();
-    var input = std.io.fixedBufferStream(raw);
-    try std.compress.zlib.compress(input.reader(), compressed.writer(), .{});
+    const compressed = try deflateZlib(allocator, raw);
+    defer allocator.free(compressed);
 
-    var out = std.ArrayList(u8).init(allocator);
-    errdefer out.deinit();
-    try out.appendSlice(&signature);
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    try out.appendSlice(allocator, &signature);
     var ihdr: [13]u8 = .{ 0, 0, 0, 0, 0, 0, 0, 0, 8, color_type, 0, 0, 0 };
     std.mem.writeInt(u32, ihdr[0..4], width, .big);
     std.mem.writeInt(u32, ihdr[4..8], height, .big);
-    try writeChunk(&out, "IHDR", &ihdr);
-    try writeChunk(&out, "IDAT", compressed.items);
-    try writeChunk(&out, "IEND", &.{});
-    return out.toOwnedSlice();
+    try writeChunk(allocator, &out, "IHDR", &ihdr);
+    try writeChunk(allocator, &out, "IDAT", compressed);
+    try writeChunk(allocator, &out, "IEND", &.{});
+    return out.toOwnedSlice(allocator);
 }
 
 fn expectDecodes(width: u32, height: u32, color_type: u8, raw: []const u8, want: []const u8) !void {

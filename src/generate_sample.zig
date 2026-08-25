@@ -128,24 +128,26 @@ pub fn drawSample(img: image.Image) void {
     }
 }
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+pub fn main(init: std.process.Init) !void {
+    const allocator = init.gpa;
+    const io = init.io;
 
-    const argv = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, argv);
-
+    const argv = try init.minimal.args.toSlice(init.arena.allocator());
     const path: []const u8 = if (argv.len >= 2) argv[1] else "examples/original.png";
-    if (std.fs.path.dirname(path)) |dir| {
-        if (dir.len > 0) try std.fs.cwd().makePath(dir);
+
+    if (!image.isStandardStream(path)) {
+        if (std.fs.path.dirname(path)) |dir| {
+            if (dir.len > 0) try std.Io.Dir.cwd().createDirPath(io, dir);
+        }
     }
 
     var img = try image.Image.init(allocator, 320, 240);
     defer img.deinit();
     drawSample(img);
-    try image.save(img, path);
+    try image.save(img, io, path, image.formatFromPath(path));
 
-    const stdout = std.io.getStdOut().writer();
-    try stdout.print("wrote {s} ({d}x{d})\n", .{ path, img.width, img.height });
+    var buffer: [256]u8 = undefined;
+    var err = std.Io.File.stderr().writerStreaming(io, &buffer);
+    try err.interface.print("wrote {s} ({d}x{d})\n", .{ path, img.width, img.height });
+    try err.interface.flush();
 }

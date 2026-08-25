@@ -102,13 +102,13 @@ test "save and load round-trip through the filesystem" {
     sample.drawSample(original);
 
     for ([_][]const u8{ "out.png", "out.ppm" }) |name| {
-        const path = try tmp.dir.realpathAlloc(allocator, ".");
+        const path = try tmp.dir.realPathFileAlloc(std.testing.io, ".", allocator);
         defer allocator.free(path);
         const full = try std.fs.path.join(allocator, &.{ path, name });
         defer allocator.free(full);
 
-        try image.save(original, full);
-        var loaded = try image.load(allocator, full);
+        try image.save(original, std.testing.io, full, image.formatFromPath(full));
+        var loaded = try image.load(allocator, std.testing.io, full);
         defer loaded.deinit();
         try std.testing.expectEqual(original.width, loaded.width);
         try std.testing.expectEqualSlices(u8, original.rgb, loaded.rgb);

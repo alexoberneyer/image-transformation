@@ -1,7 +1,7 @@
 .{
     .name = .image_transformation,
     .version = "0.1.0",
-    .minimum_zig_version = "0.14.0",
+    .minimum_zig_version = "0.16.0",
     .fingerprint = 0x6524cdef32b76c91, // Changing this has security and trust implications.
     .paths = .{
         "build.zig",

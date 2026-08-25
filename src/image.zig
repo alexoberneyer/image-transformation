@@ -1,5 +1,6 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const Io = std.Io;
 const cipher = @import("cipher.zig");
 const png = @import("png.zig");
 const ppm = @import("ppm.zig");
@@ -7,6 +8,18 @@ const ppm = @import("ppm.zig");
 /// Refuse to read anything larger than this. A `max_pixels` RGBA PNG is well
 /// under it even before compression.
 pub const max_file_bytes = 256 * 1024 * 1024;
+
+/// The path that stands for stdin or stdout, so the tools can sit in a pipe
+/// without an image ever touching the filesystem. That matters here: a temp
+/// file would leave the plaintext image on disk.
+pub const standard_stream = "-";
+
+/// How much of a standard stream to buffer at a time.
+const stream_buffer_bytes = 64 * 1024;
+
+pub fn isStandardStream(path: []const u8) bool {
+    return std.mem.eql(u8, path, standard_stream);
+}
 
 pub const Format = enum { png, ppm };
 
@@ -77,14 +90,23 @@ pub fn formatFromPath(path: []const u8) Format {
 }
 
 /// Detects the format from the file's own contents, not its name, so a
-/// mislabelled file still loads.
-pub fn load(allocator: Allocator, path: []const u8) !Image {
-    const data = try std.fs.cwd().readFileAlloc(allocator, path, max_file_bytes);
+/// mislabelled file - or a nameless stream - still loads.
+pub fn load(allocator: Allocator, io: Io, path: []const u8) !Image {
+    const data = if (isStandardStream(path))
+        try readAll(allocator, io, Io.File.stdin())
+    else
+        try Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(max_file_bytes));
     defer allocator.free(data);
 
     if (png.looksLike(data)) return Image.adopt(allocator, try png.decode(allocator, data));
     if (ppm.looksLike(data)) return Image.adopt(allocator, try ppm.decode(allocator, data));
     return error.UnsupportedImageFormat;
+}
+
+fn readAll(allocator: Allocator, io: Io, file: Io.File) ![]u8 {
+    var buffer: [stream_buffer_bytes]u8 = undefined;
+    var reader = file.readerStreaming(io, &buffer);
+    return reader.interface.allocRemaining(allocator, .limited(max_file_bytes));
 }
 
 pub fn encode(allocator: Allocator, img: Image, format: Format) ![]u8 {
@@ -94,10 +116,20 @@ pub fn encode(allocator: Allocator, img: Image, format: Format) ![]u8 {
     };
 }
 
-pub fn save(img: Image, path: []const u8) !void {
-    const bytes = try encode(img.allocator, img, formatFromPath(path));
+/// `format` is passed in rather than derived here because a standard stream
+/// has no name to read it from.
+pub fn save(img: Image, io: Io, path: []const u8, format: Format) !void {
+    const bytes = try encode(img.allocator, img, format);
     defer img.allocator.free(bytes);
-    try std.fs.cwd().writeFile(.{ .sub_path = path, .data = bytes });
+
+    if (isStandardStream(path)) {
+        var buffer: [stream_buffer_bytes]u8 = undefined;
+        var writer = Io.File.stdout().writerStreaming(io, &buffer);
+        try writer.interface.writeAll(bytes);
+        try writer.interface.flush();
+        return;
+    }
+    try Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = bytes });
 }
 
 test "image format detection" {

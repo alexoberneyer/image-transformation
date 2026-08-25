@@ -9,7 +9,7 @@ A wrong key still produces an image, but it looks like noise.
 
 ## Requirements
 
-- [Zig 0.14.x](https://ziglang.org/download/)
+- [Zig 0.16.x](https://ziglang.org/download/)
 
 ## Build
 
@@ -49,6 +49,20 @@ zig run src/to_noise.zig -- --key "my-secret" photo.png -o noise.png
 zig run src/from_noise.zig -- --key "my-secret" noise.png -o restored.png
 ```
 
+### Pipes
+
+A path of `-` reads stdin or writes stdout, so a whole round trip can happen
+without an image ever reaching the filesystem - which matters for a tool whose
+input is the secret:
+
+```bash
+cat photo.png | to-noise --key "s3cret" - -o - | from-noise --key "s3cret" - -o - > restored.png
+```
+
+`--format png|ppm` picks the container when the output is a stream and has no
+extension to read it from. Progress and fingerprints always go to stderr, so
+the pipe stays clean.
+
 ### Keys
 
 Provide **exactly one** of:
@@ -58,8 +72,46 @@ Provide **exactly one** of:
 | `-k`, `--key <text>` | Passphrase. Any length. Fed through BLAKE3-KDF. |
 | `--key-file <path>` | Raw key bytes from a file — the *exact* bytes, so a trailing newline is part of the key. |
 | `--key-hex <hex>` | 64 hex digits (32-byte master key), with or without a `0x` prefix. |
+| `--key-env <name>` | Read the passphrase from an environment variable. |
 
-Each run prints a `key-id` (a non-secret fingerprint of the key) and a `pixel fingerprint` of the output. Matching fingerprints after a round-trip means reconstruction succeeded.
+Prefer `--key-env` for anything scripted. A key passed as `--key` sits in the
+process's argv, where any other process on the machine can read it out of `ps`,
+and a `--key-file` leaves the key on disk. The environment is the one channel
+that avoids both:
+
+```bash
+export IMAGE_NOISE_KEY=$(security find-generic-password -w -s image-noise)
+to-noise --key-env IMAGE_NOISE_KEY photo.png
+```
+
+### Verifying a round trip
+
+The transform is not authenticated: a wrong key produces an image rather than
+an error, and a mangled noise file is indistinguishable from a wrong key. The
+fingerprints are what tell the two apart. Each run reports a non-secret
+`key-id` plus a fingerprint of the pixels going in and coming out:
+
+```
+$ to-noise --key "s3cret" photo.png -o noise.png
+wrote noise.png (320x240 noise)
+key-id 56b5b2bbfdf8a28c
+source fingerprint f32c46cd062680ceafd1d5ee95d86181
+noise fingerprint 1cbcf26c5e4304a9415cf706a650fd96
+
+$ from-noise --key "s3cret" noise.png -o restored.png
+wrote restored.png (320x240 restored image)
+key-id 56b5b2bbfdf8a28c
+noise fingerprint 1cbcf26c5e4304a9415cf706a650fd96
+restored fingerprint f32c46cd062680ceafd1d5ee95d86181
+```
+
+Two independent checks fall out of that:
+
+- The **`noise` fingerprints agree**, so the noise reached `from-noise` byte for
+  byte. If they differ, whatever carried the file re-encoded it.
+- **`restored` matches the original `source`**, so the key was right. If the
+  `noise` lines agree but this one does not, the file is fine and the key is
+  wrong.
 
 ### Formats
 
@@ -71,6 +123,45 @@ Alpha is dropped on load. Output is always opaque RGB. Images are capped at 64 m
 Keep the noise file lossless. JPEG (or any other lossy export) will make reconstruction impossible.
 
 The PNG writer probes the payload and picks between deflate and stored blocks. Noise does not compress, so `to-noise` skips a pointless deflate pass; `from-noise` output is a real image again and gets compressed normally. Either way the result is an ordinary PNG.
+
+## Clipboard (macOS)
+
+`scripts/clip-to-noise` and `scripts/clip-from-noise` wrap the tools around the
+pasteboard, so a screenshot can become noise and come back without a filename
+in sight. They build what they need on first run.
+
+```bash
+# copy an image, then:
+scripts/clip-to-noise           # clipboard now holds the noise
+scripts/clip-from-noise         # ...and now the original again
+```
+
+The key comes from `$IMAGE_NOISE_KEY`, or the login keychain, or a prompt - in
+that order. To set one up once:
+
+```bash
+security add-generic-password -s image-noise -a "$USER" -w
+```
+
+Two details in there are not incidental:
+
+**`clip-to-noise` leaves a file *reference* on the clipboard, not a bitmap.**
+Pasting a reference into a chat or a document attaches the PNG untouched;
+pasting a bitmap lets the receiving app re-encode it, and a re-encoded noise
+image cannot be inverted. `--bitmap` opts into the inline paste when that is
+genuinely what you want, and skips the disk entirely.
+
+**Only the `to-noise` side normalizes.** Clipboard images arrive as 16-bit, or
+with an alpha channel, or with a colour profile attached - shapes the transform
+rejects. Forcing them to 8-bit RGB is harmless going in, because whatever pixels
+come out of it are simply what gets encrypted. Doing the same on the way back
+would colour-manage the noise and destroy the exact bytes the inverse depends
+on, so `clip-from-noise` passes them through untouched.
+
+The pasteboard itself is lossless as long as a lossless flavour is pinned, which
+the helper does. It advertises several at once - a single copy can offer PNG,
+TIFF, JPEG, GIF and AVIF - and asking for the wrong one silently destroys the
+payload.
 
 ## How the transform works
 
@@ -110,12 +201,12 @@ The PNG writer probes the payload rather than always deflating, which matters be
 
 A 3000x2000 image, `-Doptimize=ReleaseFast`, best of three:
 
-| | before | after | peak RSS |
-| --- | --- | --- | --- |
-| `to-noise` PPM to PPM | 1208 ms | **292 ms** | 80 -> 57 MB |
-| `to-noise` PPM to PNG | 1773 ms | **385 ms** | 80 -> 69 MB |
-| `from-noise` PNG to PNG | 1142 ms | **466 ms** | 86 -> 69 MB |
-| `from-noise` PNG to PPM | 1126 ms | **399 ms** | 86 -> 69 MB |
+| | time | peak RSS |
+| --- | --- | --- |
+| `to-noise` PPM to PPM | 80 ms | 59 MB |
+| `to-noise` PPM to PNG | 110 ms | 77 MB |
+| `from-noise` PNG to PNG | 150 ms | 80 MB |
+| `from-noise` PNG to PPM | 110 ms | 76 MB |
 
 ## Tests
 
