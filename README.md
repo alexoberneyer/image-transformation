@@ -5,7 +5,9 @@ Keyed, lossless **image → noise → image** transforms in Zig.
 `to-noise` turns any PNG or PPM into a noise image using a secret key.
 `from-noise` applies the matching inverse transform and reconstructs the original pixels, byte for byte, when given that same key.
 
-A wrong key still produces an image, but it looks like noise.
+Every noise image carries its own random salt and an authentication tag, so a
+wrong key - or a file altered anywhere along the way - is refused outright
+rather than restored into something that merely looks wrong.
 
 ## Requirements
 
@@ -69,9 +71,9 @@ Provide **exactly one** of:
 
 | Option | Meaning |
 | --- | --- |
-| `-k`, `--key <text>` | Passphrase. Any length. Fed through BLAKE3-KDF. |
+| `-k`, `--key <text>` | Passphrase. Any length. Stretched with Argon2id. |
 | `--key-file <path>` | Raw key bytes from a file — the *exact* bytes, so a trailing newline is part of the key. |
-| `--key-hex <hex>` | 64 hex digits (32-byte master key), with or without a `0x` prefix. |
+| `--key-hex <hex>` | 64 hex digits used as the 32-byte master key directly, with or without a `0x` prefix. |
 | `--key-env <name>` | Read the passphrase from an environment variable. |
 
 Prefer `--key-env` for anything scripted. A key passed as `--key` sits in the
@@ -84,16 +86,25 @@ export IMAGE_NOISE_KEY=$(security find-generic-password -w -s image-noise)
 to-noise --key-env IMAGE_NOISE_KEY photo.png
 ```
 
+Everything except `--key-hex` is treated as a passphrase and stretched with
+Argon2id (19 MiB, two passes) before it becomes a master key. That costs about
+20 ms per run and is the only thing standing between a memorable passphrase and
+a GPU that would otherwise test billions of guesses a second. `--key-hex` skips
+the stretching, because 32 random bytes have nothing left to guess. Which one an
+image was made with is recorded in the image, so the inverse does not have to be
+told again.
+
 ### Verifying a round trip
 
-The transform is not authenticated: a wrong key produces an image rather than
-an error, and a mangled noise file is indistinguishable from a wrong key. The
-fingerprints are what tell the two apart. Each run reports a non-secret
-`key-id` plus a fingerprint of the pixels going in and coming out:
+The authentication tag does this for you: `from-noise` verifies it over the
+whole file before the key touches a single pixel, so a wrong key and a modified
+file both stop at the same gate and neither produces an image. The fingerprints
+are still printed, now as something to read rather than something to rely on -
+a non-secret `key-id` plus a fingerprint of the pixels going in and coming out:
 
 ```
 $ to-noise --key "s3cret" photo.png -o noise.png
-wrote noise.png (320x240 noise)
+wrote noise.png (320x241 noise)
 key-id 56b5b2bbfdf8a28c
 source fingerprint f32c46cd062680ceafd1d5ee95d86181
 noise fingerprint 1cbcf26c5e4304a9415cf706a650fd96
@@ -105,13 +116,21 @@ noise fingerprint 1cbcf26c5e4304a9415cf706a650fd96
 restored fingerprint f32c46cd062680ceafd1d5ee95d86181
 ```
 
-Two independent checks fall out of that:
+The noise is one row taller than the picture: that row carries the salt and the
+tag. `from-noise` strips it again, so what comes back has the original
+dimensions.
 
-- The **`noise` fingerprints agree**, so the noise reached `from-noise` byte for
-  byte. If they differ, whatever carried the file re-encoded it.
-- **`restored` matches the original `source`**, so the key was right. If the
-  `noise` lines agree but this one does not, the file is fine and the key is
-  wrong.
+If verification fails there is nothing to compare, because nothing is written:
+
+```
+$ from-noise --key "wrong" noise.png -o restored.png
+error: authentication failed: the key is wrong, or this file is not the one that was written
+(key-id f40ada885a612076 for the key given)
+```
+
+That one message covers both failures on purpose - the tag cannot tell a wrong
+key from a wrong file, and neither can you. What separates them in practice is
+whether the recipient's `key-id` matches the one in the sender's output.
 
 ### Formats
 
@@ -119,6 +138,14 @@ Two independent checks fall out of that:
 - **PPM** binary `P6` (RGB) and `P5` (grayscale), maxval 255
 
 Alpha is dropped on load. Output is always opaque RGB. Images are capped at 64 megapixels.
+
+A noise image is a few rows taller than the picture it came from - one row for
+anything at least 21 pixels wide, more for a narrow column. Those rows hold the
+salt and the tag. They live in the pixels rather than in a PNG metadata chunk
+because pixels are the one thing every carrier of a lossless image preserves; a
+text chunk would be stripped by the first tool that touched the file while
+leaving the picture intact, which is a new way to lose data that looks like
+nothing went wrong. PPM has nowhere to put one at all.
 
 Keep the noise file lossless. JPEG (or any other lossy export) will make reconstruction impossible.
 
@@ -176,7 +203,7 @@ back afterwards:
 
 ```
 $ scripts/clip-to-noise
-wrote /tmp/image-noise/noise-20260825-095938-b36bda7681dcf4ca.png (320x240 noise)
+wrote /tmp/image-noise/noise-20260825-095938-b36bda7681dcf4ca.png (320x241 noise)
 key-id b36bda7681dcf4ca
 source fingerprint f32c46cd062680ceafd1d5ee95d86181
 noise fingerprint f4fa663906bbec051cd179d720f27cb2
@@ -250,7 +277,7 @@ Three things about the wrappers are deliberate.
 **They run in `fullOutput` mode.** The interesting output is never the last
 line. Going out, a minted key is printed once and is the only copy a recipient
 can be handed; coming back, the fingerprints are the only thing separating a
-wrong key from a file that was re-encoded in transit. `compact` shows one line
+wrong key from a file that could not be opened at all. `compact` shows one line
 and would hide both.
 
 **They fold stderr into stdout.** The clipboard scripts report on stderr to keep
@@ -298,40 +325,100 @@ next app is free to re-encode - which no key can undo afterwards. On the
 clipboard fallback the old rule still holds: copy the file in Finder with ⌘C,
 never the picture out of an opened PNG.
 
-**The key-id is their version of the fingerprint check.** They never saw the
-original, so a `restored` fingerprint tells them nothing. The `key-id` line does:
-it is a public digest of the key they just typed, and while the file still
-carries its own id in the name, the two match only when the key is the one the
-image was made with.
+**A wrong key fails loudly.** They never saw the original, so a `restored`
+fingerprint would tell them nothing - but the tag does not need them to know
+anything. A key that is not the one the image was made with produces an error and
+no file, so there is no wrong image to mistake for a right one.
+
 ## How the transform works
 
-The key never travels with the image. Both directions re-derive the same material from the passphrase plus the image width and height.
+The key never travels with the image. The salt does, in the header rows, and both directions re-derive the same material from the key plus that salt plus the picture's dimensions.
 
 ```
-passphrase
-    │
-    ▼
-BLAKE3-KDF  ──► master key
-    │
-    ├── permute seed  ──► ChaCha8 CSPRNG  ──► Fisher–Yates pixel permutation
-    └── diffuse key + nonce  ──► ChaCha20  ──► XOR of every RGB byte
+passphrase                        32 random bytes (--key-hex)
+    │                                      │
+    ▼                                      │
+Argon2id  (19 MiB, t=2)                    │
+    │                                      │
+    └──────────────► master key ◄──────────┘
+                          │
+              + per-image salt + dimensions
+                          │
+                     BLAKE3-KDF
+                          │
+    ├── permute seed  ──► ChaCha8 CSPRNG ──► Fisher–Yates pixel permutation
+    ├── diffuse key + nonce  ──► ChaCha20 ──► XOR of every RGB byte
+    └── mac key  ──► keyed BLAKE3 ──► tag over the whole noise image
 ```
 
 **Forward (`to-noise`)**
 
-1. Shuffle pixels with a keyed permutation.
-2. XOR the packed RGB buffer with a ChaCha20 keystream.
+1. Draw a fresh 16-byte salt and derive the schedule from it.
+2. Shuffle pixels with a keyed permutation.
+3. XOR the packed RGB buffer with a ChaCha20 keystream.
+4. Tag the result - header, salt, dimensions, padding and ciphertext - with keyed BLAKE3.
 
 **Inverse (`from-noise`)**
 
-1. XOR with the same keystream (XOR is its own inverse).
-2. Apply the inverse permutation.
+1. Read the salt out of the header and derive the same schedule.
+2. Recompute the tag and compare in constant time. Stop here if it does not match.
+3. XOR with the same keystream (XOR is its own inverse).
+4. Apply the inverse permutation.
 
-Without the key, both the pixel order and the color values are computationally infeasible to recover. This is a reversible visual cipher, not authenticated encryption: it does not detect a wrong key or a tampered file, it just fails to look like the original.
+The salt is what makes this safe to use more than once with one key. Without it the schedule depended on the passphrase and the dimensions alone, so two pictures of the same size under the same key shared a keystream exactly: `C1 xor C2` cancelled it and left a permutation of `A xor B`, which for two scans of the same form is close to handing over both. Encrypt-then-MAC is what makes a wrong key an error instead of a plausible-looking wrong image, and what stops a ChaCha20 keystream - malleable by construction - from letting someone flip chosen bits in the picture that comes back.
+
+The permutation is not what provides secrecy; ChaCha20 is. It is what makes the output look like an image rather than static, and it stays because that is the point of the tool.
 
 ### Format stability
 
-The byte stream is a contract: a noise image is only useful if a later build can still invert it. `cipher.zig` carries a known-answer test that pins the key schedule, the pixel permutation and the keystream, so any change to them fails the test suite instead of quietly stranding existing noise images.
+The byte stream is a contract: a noise image is only useful if a later build can still invert it. `cipher.zig` carries known-answer tests that pin the key schedule, the pixel permutation and the keystream, so any change to them fails the test suite instead of quietly stranding existing noise images.
+
+There are two formats. **v2** is what `to-noise` writes: header rows, a salt and a tag. **v1** is everything written before those existed - no header, no salt, no authentication. `from-noise` recognises a v1 image by the absence of the magic at the start of the pixels, opens it with the old unstretched key schedule, and says so:
+
+```
+warning: this is a v1 noise image - no salt, no authentication.
+```
+
+Nothing writes v1 any more. Re-encrypting an old image with this build is the fix, and worth doing for anything that matters.
+
+## What this protects, and what it does not
+
+Closed by the current format:
+
+- **A key used on more than one image.** Every image draws its own 16-byte salt,
+  so no two share a keystream. Before, the schedule came from the passphrase and
+  the dimensions alone, and two scans of one form under one key leaked the
+  difference between them.
+- **Cheap guessing of a passphrase.** Argon2id costs 19 MiB and two passes per
+  candidate. The old single BLAKE3 pass cost a few hundred nanoseconds, and the
+  `key-id` printed in every filename was a free offline oracle for testing
+  guesses against.
+- **Silent modification.** ChaCha20 is malleable by construction: a flipped bit
+  in the noise used to become a flipped bit in the restored picture, with
+  nothing to notice it. The tag is checked before the key touches the pixels.
+
+Still true, and worth knowing before trusting it with anything that matters:
+
+- **The Argon2id salt is fixed, not per-image.** It has to be, for `key-id` to
+  stay a stable name for a key across every image made with it - which is what
+  the clipboard scripts use to find it in the keychain again. The cost is that
+  one precomputed Argon2id table works against every user of this tool. That
+  table is expensive to build and nobody has built it, but a high-entropy key
+  (`--key-hex`, or the random key the clipboard scripts mint) sidesteps the
+  question entirely.
+- **Nothing about the sender is authenticated.** The tag proves the file was not
+  altered after it was made. It says nothing about who made it: anyone holding
+  the key can produce a valid image.
+- **The metadata is in the clear.** Dimensions, file size, and - if you keep the
+  clipboard scripts' naming - a `key-id` in the filename that links every image
+  made with the same key.
+- **A lossy carrier still destroys the image.** JPEG, a re-encode, a pasted
+  bitmap: any of them and the file will not open. That failure is at least loud
+  now.
+
+And the honest framing: if the goal is to get a document to someone privately,
+[`age`](https://age-encryption.org) is the better tool and one command. This one
+earns its place only when the channel takes images and nothing else.
 
 ## Performance
 
@@ -343,10 +430,12 @@ A 3000x2000 image, `-Doptimize=ReleaseFast`, best of three:
 
 | | time | peak RSS |
 | --- | --- | --- |
-| `to-noise` PPM to PPM | 80 ms | 59 MB |
-| `to-noise` PPM to PNG | 110 ms | 77 MB |
-| `from-noise` PNG to PNG | 150 ms | 80 MB |
-| `from-noise` PNG to PPM | 110 ms | 76 MB |
+| `to-noise` PPM to PPM | 130 ms | 78 MB |
+| `to-noise` PPM to PNG | 170 ms | 113 MB |
+| `from-noise` PNG to PNG | 195 ms | 94 MB |
+| `from-noise` PNG to PPM | 155 ms | 76 MB |
+
+About 20 ms of each of those is Argon2id, which is a fixed cost per run rather than per pixel: on a small image it is most of the wall clock, and `--key-hex` skips it.
 
 ## Tests
 

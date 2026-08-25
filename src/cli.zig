@@ -2,6 +2,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const cipher = @import("cipher.zig");
+const container = @import("container.zig");
 const image = @import("image.zig");
 
 pub const Direction = cipher.Direction;
@@ -20,6 +21,10 @@ pub const Context = struct {
 pub const Args = struct {
     allocator: Allocator,
     key: []u8,
+    /// How the supplied bytes become a master key. `--key-hex` hands over full
+    /// entropy and is used as-is; everything else is a passphrase and gets
+    /// stretched.
+    kdf: cipher.KdfId,
     input: []const u8,
     output: []const u8,
     format: image.Format,
@@ -68,24 +73,29 @@ fn usage(direction: Direction) []const u8 {
             .command = "to-noise",
             .input = "input-image",
             .summary =
-            \\Transform an image into deterministic keyed noise. The inverse
+            \\Transform an image into authenticated keyed noise. The inverse
             \\(`from-noise` with the same key) restores the original pixels.
             ,
             .tag = "noise",
             .footer =
             \\Supported formats: PNG (8-bit gray/RGB/RGBA) and binary PPM (P5/P6).
             \\Keep the noise image lossless; JPEG will destroy the hidden data.
+            \\The noise is a few rows taller than the input: those rows carry the
+            \\per-image salt and the authentication tag.
             ,
         }),
         .from_noise => std.fmt.comptimePrint(template, .{
             .command = "from-noise",
             .input = "noise-image",
             .summary =
-            \\Apply the inverse transformation and reconstruct the original image.
-            \\The key must match the one used with `to-noise`.
+            \\Verify a noise image and reconstruct the original. The key must match
+            \\the one used with `to-noise`.
             ,
             .tag = "restored",
-            .footer = "A wrong key still produces an image, but it will look like noise.",
+            .footer =
+            \\A wrong key, or a file altered anywhere along the way, is rejected
+            \\outright rather than restored into something that looks like noise.
+            ,
         }),
     };
 }
@@ -227,6 +237,7 @@ pub fn parse(ctx: Context, direction: Direction) !Args {
     return .{
         .allocator = allocator,
         .key = key,
+        .kdf = if (key_hex != null) .raw else .argon2id,
         .input = in_owned,
         .output = out_owned,
         .format = try resolveFormat(format_text, out_owned),
@@ -259,6 +270,149 @@ fn report(io: Io, comptime fmt: []const u8, args: anytype) !void {
     try err.interface.flush();
 }
 
+fn masterOrFatal(ctx: Context, key: []const u8, kdf: cipher.KdfId) cipher.Master {
+    return cipher.deriveMaster(ctx.allocator, ctx.io, key, kdf) catch |err| switch (err) {
+        error.RawKeyLength => fatal(
+            "this noise image was made with a 32-byte raw key; supply it with --key-hex",
+            .{},
+        ),
+        error.UnsupportedKdf => fatal(
+            "this noise image uses a key derivation this build does not know; upgrade the tools",
+            .{},
+        ),
+        else => fatal("cannot derive the key: {t}", .{err}),
+    };
+}
+
+/// What a run produced, so the two directions can share one report.
+const Outcome = struct {
+    width: u32,
+    height: u32,
+    key_id: [8]u8,
+    in_fp: [16]u8,
+    out_fp: [16]u8,
+};
+
+/// Wraps the picture in a v2 container: header rows carrying a fresh salt and a
+/// tag, followed by the transformed pixels.
+fn toNoise(ctx: Context, args: Args, src: image.Image) !Outcome {
+    var salt: cipher.Salt = undefined;
+    ctx.io.randomSecure(&salt) catch fatal("no source of secure randomness is available", .{});
+
+    var master = masterOrFatal(ctx, args.key, args.kdf);
+    defer std.crypto.secureZero(u8, &master);
+    var keys = cipher.deriveKeys(master, salt, src.width, src.height);
+    defer std.crypto.secureZero(u8, std.mem.asBytes(&keys));
+
+    var out = container.wrap(ctx.allocator, ctx.io, src, .{
+        .kdf = args.kdf,
+        .width = src.width,
+        .height = src.height,
+        .salt = salt,
+        .mac = undefined,
+    }, keys) catch |err| switch (err) {
+        error.InvalidImageSize => fatal(
+            "image is too large: the header rows push it past the {d} pixel limit",
+            .{cipher.max_pixels},
+        ),
+        error.EntropyUnavailable => fatal("no source of secure randomness is available", .{}),
+        else => return err,
+    };
+    defer out.deinit();
+
+    try save(ctx, args, out);
+    return .{
+        .width = out.width,
+        .height = out.height,
+        .key_id = cipher.keyId(master),
+        .in_fp = cipher.fingerprint(src.rgb),
+        .out_fp = cipher.fingerprint(out.rgb),
+    };
+}
+
+/// Verifies a v2 container and unwraps it, or falls back to the unauthenticated
+/// v1 layout for noise written before the format change.
+fn fromNoise(ctx: Context, args: Args, noise: image.Image) !Outcome {
+    const header = container.parseHeader(noise.rgb) catch |err| switch (err) {
+        error.NotV2 => return fromNoiseV1(ctx, args, noise),
+        error.UnsupportedVersion => fatal(
+            "this noise image was written by a newer build of the tools; upgrade to open it",
+            .{},
+        ),
+    };
+
+    var master = masterOrFatal(ctx, args.key, header.kdf);
+    defer std.crypto.secureZero(u8, &master);
+    var keys = cipher.deriveKeys(master, header.salt, header.width, header.height);
+    defer std.crypto.secureZero(u8, std.mem.asBytes(&keys));
+
+    var out = container.unwrap(ctx.allocator, noise, header, keys) catch |err| switch (err) {
+        error.AuthenticationFailed => fatal(
+            "authentication failed: the key is wrong, or this file is not the one that was written\n" ++
+                "(key-id {s} for the key given)",
+            .{std.fmt.bytesToHex(cipher.keyId(master), .lower)},
+        ),
+        error.GeometryMismatch => fatal(
+            "this noise image has been cropped or resized; the header no longer matches it",
+            .{},
+        ),
+        error.InvalidImageSize => fatal("image dimensions are out of range", .{}),
+        else => return err,
+    };
+    defer out.deinit();
+
+    try save(ctx, args, out);
+    return .{
+        .width = out.width,
+        .height = out.height,
+        .key_id = cipher.keyId(master),
+        .in_fp = cipher.fingerprint(noise.rgb),
+        .out_fp = cipher.fingerprint(out.rgb),
+    };
+}
+
+/// The pre-salt, pre-MAC layout, kept readable so noise made by an older build
+/// is not stranded. There is nothing to verify here, which is the whole reason
+/// the format changed.
+fn fromNoiseV1(ctx: Context, args: Args, noise: image.Image) !Outcome {
+    try report(ctx.io,
+        \\warning: this is a v1 noise image - no salt, no authentication.
+        \\         A wrong key will produce a plausible-looking wrong image, and
+        \\         any change to the file will go unnoticed. Re-encrypt it with
+        \\         this build to fix both.
+        \\
+    , .{});
+
+    var master = cipher.deriveMasterV1(args.key);
+    defer std.crypto.secureZero(u8, &master);
+    var keys = cipher.deriveKeysV1(master, noise.width, noise.height);
+    defer std.crypto.secureZero(u8, std.mem.asBytes(&keys));
+
+    const in_fp = cipher.fingerprint(noise.rgb);
+    try cipher.transform(ctx.allocator, noise.rgb, noise.width, noise.height, keys, .from_noise);
+
+    try save(ctx, args, noise);
+    return .{
+        .width = noise.width,
+        .height = noise.height,
+        .key_id = cipher.keyId(master),
+        .in_fp = in_fp,
+        .out_fp = cipher.fingerprint(noise.rgb),
+    };
+}
+
+fn save(ctx: Context, args: Args, img: image.Image) !void {
+    if (!image.isStandardStream(args.output)) {
+        if (std.fs.path.dirname(args.output)) |dir| {
+            // A missing parent directory surfaces as a clearer error from `save`.
+            if (dir.len > 0) Io.Dir.cwd().createDirPath(ctx.io, dir) catch {};
+        }
+    }
+    image.save(img, ctx.io, args.output, args.format) catch |err| {
+        fatal("cannot write {s}: {t}", .{ args.output, err });
+    };
+}
+
 pub fn run(ctx: Context, direction: Direction) !void {
     var args = try parse(ctx, direction);
     defer args.deinit();
@@ -274,24 +428,14 @@ pub fn run(ctx: Context, direction: Direction) !void {
     };
     defer img.deinit();
 
-    // Fingerprinting both sides is what makes a round trip checkable. The
-    // `noise` fingerprints of the two tools must agree, which proves the noise
-    // reached `from-noise` intact; `source` and `restored` agreeing proves the
-    // key was right. Neither is detectable from the image alone.
-    const in_fp = cipher.fingerprint(img.rgb);
-    try cipher.transform(ctx.allocator, img.rgb, img.width, img.height, args.key, direction);
-    const out_fp = cipher.fingerprint(img.rgb);
-
-    if (!image.isStandardStream(args.output)) {
-        if (std.fs.path.dirname(args.output)) |dir| {
-            // A missing parent directory surfaces as a clearer error from `save`.
-            if (dir.len > 0) Io.Dir.cwd().createDirPath(ctx.io, dir) catch {};
-        }
-    }
-    image.save(img, ctx.io, args.output, args.format) catch |err| {
-        fatal("cannot write {s}: {t}", .{ args.output, err });
+    const outcome = switch (direction) {
+        .to_noise => try toNoise(ctx, args, img),
+        .from_noise => try fromNoise(ctx, args, img),
     };
 
+    // Fingerprinting both sides still makes a round trip checkable by eye. The
+    // authentication tag is what actually decides whether the noise arrived
+    // intact and the key was right; these are for reading, not for trusting.
     const names = labels(direction);
     try report(ctx.io,
         \\wrote {s} ({d}x{d} {s})
@@ -301,14 +445,14 @@ pub fn run(ctx: Context, direction: Direction) !void {
         \\
     , .{
         args.output,
-        img.width,
-        img.height,
+        outcome.width,
+        outcome.height,
         names.wrote,
-        std.fmt.bytesToHex(cipher.keyId(args.key), .lower),
+        std.fmt.bytesToHex(outcome.key_id, .lower),
         names.input,
-        std.fmt.bytesToHex(in_fp, .lower),
+        std.fmt.bytesToHex(outcome.in_fp, .lower),
         names.output,
-        std.fmt.bytesToHex(out_fp, .lower),
+        std.fmt.bytesToHex(outcome.out_fp, .lower),
     });
 }
 
@@ -383,6 +527,8 @@ test "usage text is complete for both directions" {
     }
     try std.testing.expect(std.mem.indexOf(u8, usage(.to_noise), "<stem>.noise.png") != null);
     try std.testing.expect(std.mem.indexOf(u8, usage(.from_noise), "<stem>.restored.png") != null);
+    // The inverse must not still promise the old wrong-key behaviour.
+    try std.testing.expect(std.mem.indexOf(u8, usage(.from_noise), "rejected") != null);
 }
 
 test "the two directions agree on the shared noise label" {
