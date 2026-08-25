@@ -42,8 +42,17 @@ export PATH="/opt/homebrew/bin:$PATH"
 scripts_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 noise_args=()
 
-if [ -n "${1:-}" ]; then
-    export IMAGE_NOISE_KEY="$1"
+# A pasted key picks up whatever whitespace came with the selection, and every
+# key option is raw bytes through the same KDF, so one trailing space is simply
+# a different key - and an unauthenticated transform cannot say so. It restores
+# noise, with only the key-id to hint at why. Trimming here is the difference
+# between that and it just working.
+key=${1:-}
+key="${key#"${key%%[![:space:]]*}"}"
+key="${key%"${key##*[![:space:]]}"}"
+
+if [ -n "$key" ]; then
+    export IMAGE_NOISE_KEY="$key"
 
     # A key long enough to be worth having is too long to type, so it arrives by
     # being pasted - which replaces whatever was on the clipboard, and the noise
