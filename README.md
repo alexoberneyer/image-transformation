@@ -215,6 +215,57 @@ renamed. Those still work - they just need the key handed back explicitly. The
 key is printed to stderr either way, so it lands in terminal scrollback; treat
 that the way you would treat any other secret on screen.
 
+## Raycast (macOS)
+
+`scripts/raycast/` holds two Raycast script commands wrapping the clipboard
+scripts, so the round trip runs from a hotkey instead of a terminal:
+
+| Command | Wraps |
+| --- | --- |
+| **Image to Noise** | `clip-to-noise` |
+| **Image from Noise** | `clip-from-noise` |
+
+Build once first, so the first press of the hotkey is not a compile:
+
+```bash
+zig build -Doptimize=ReleaseFast
+```
+
+Then point Raycast at the folder: **Settings → Extensions → Script Commands →
+Add Script Directory**, and pick `scripts/raycast`. Both commands appear under
+the *Image Noise* package, searchable by title, and a hotkey can be bound to
+each from the same screen.
+
+Nothing else needs configuring. The keychain entry these scripts write is
+created by `/usr/bin/security` and read back by that same binary, which macOS
+trusts automatically, so a key resolves inside a Raycast-launched script without
+an authorization dialog in the way.
+
+Three things about the wrappers are deliberate.
+
+**They run in `fullOutput` mode.** The interesting output is never the last
+line. Going out, a minted key is printed once and is the only copy a recipient
+can be handed; coming back, the fingerprints are the only thing separating a
+wrong key from a file that was re-encoded in transit. `compact` shows one line
+and would hide both.
+
+**They fold stderr into stdout.** The clipboard scripts report on stderr to keep
+their pipes clean, and Raycast displays stdout.
+
+**They put Homebrew back on `$PATH`.** Raycast runs script commands in a
+non-interactive shell that reads no profile, so the PATH is bare and `zig` -
+which `require_tools` falls back to - is not on it. `swiftc` already lives in
+`/usr/bin` and needs no help.
+
+`--bitmap` is deliberately not reachable from here. Inlining a bitmap lets the
+next app re-encode the noise, and a single keystroke is too short a path to an
+image nobody can invert.
+
+One consequence of the hotkey worth knowing: what lands on the clipboard is a
+reference to a file under `$TMPDIR`, which macOS reaps on its own schedule.
+Pasting shortly afterwards is fine and uploads the bytes; coming back to
+re-paste that same reference next week is not.
+
 ## How the transform works
 
 The key never travels with the image. Both directions re-derive the same material from the passphrase plus the image width and height.
