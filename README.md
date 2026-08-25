@@ -266,6 +266,29 @@ reference to a file under `$TMPDIR`, which macOS reaps on its own schedule.
 Pasting shortly afterwards is fine and uploads the bytes; coming back to
 re-paste that same reference next week is not.
 
+### Handing an image to someone else
+
+**Image from Noise** takes an optional key, masked as it is typed. Left empty it
+behaves as it always did and resolves the key from the keychain. Filled in, it is
+the only way anyone who did not make the image can restore it: their keychain
+holds nothing under its key-id, and there is no tty here for `prompt_key` to fall
+back to. It covers a file that arrived renamed, too, with the key-id no longer in
+the name to read.
+
+Send the noise file and the hex key `clip-to-noise` printed, by different routes
+if the image is worth that much. Two things the recipient needs to know.
+
+**Copy the file, not the picture.** Select it in Finder and press ⌘C. Opening the
+PNG and copying the image puts a bitmap on the pasteboard instead, which the next
+app is free to re-encode, and re-encoded noise cannot be inverted. No key fixes
+that afterwards.
+
+**The key-id is their version of the fingerprint check.** They never saw the
+original, so a `restored` fingerprint tells them nothing. The `key-id` line does:
+it is a public digest of the key they just typed, and while the file still
+carries its own id in the name, the two match only when the key is the one the
+image was made with.
+
 ## How the transform works
 
 The key never travels with the image. Both directions re-derive the same material from the passphrase plus the image width and height.
