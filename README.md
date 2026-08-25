@@ -136,6 +136,10 @@ scripts/clip-to-noise           # clipboard now holds the noise
 scripts/clip-from-noise         # ...and now the original again
 ```
 
+`clip-from-noise -i <path>` reads the noise from a file instead of the
+clipboard, for when the clipboard is needed for something else. Same bytes off
+the same disk; only the route differs.
+
 The key comes from `$IMAGE_NOISE_KEY`, or the login keychain, or - with neither
 configured - a random one minted for that image alone. To use one passphrase
 across everything instead, set it up once:
@@ -272,23 +276,33 @@ re-paste that same reference next week is not.
 behaves as it always did and resolves the key from the keychain. Filled in, it is
 the only way anyone who did not make the image can restore it: their keychain
 holds nothing under its key-id, and there is no tty here for `prompt_key` to fall
-back to. It covers a file that arrived renamed, too, with the key-id no longer in
-the name to read.
+back to.
 
-Send the noise file and the hex key `clip-to-noise` printed, by different routes
-if the image is worth that much. Two things the recipient needs to know.
+A key worth having is too long to type, so it arrives by being pasted - and that
+replaces whatever was on the clipboard, which cannot then also hold the noise.
+So the recipient does not put the image on the clipboard at all:
 
-**Copy the file, not the picture.** Select it in Finder and press ⌘C. Opening the
-PNG and copying the image puts a bitmap on the pasteboard instead, which the next
-app is free to re-encode, and re-encoded noise cannot be inverted. No key fixes
-that afterwards.
+1. Save the noise file and **select it in Finder**. No need to copy it.
+2. Copy the key.
+3. Run **Image from Noise** and paste the key into the argument.
+
+The first run asks macOS for permission to read the Finder selection, once. If
+it is declined, the command says so and falls back to reading the clipboard,
+which still works for anyone who copied the file and has the key somewhere it
+need not be pasted. To restore a declined prompt: System Settings > Privacy &
+Security > Automation > Raycast > Finder.
+
+Taking the file this way also retires the sharpest edge in the whole workflow.
+A file that is never copied cannot arrive as a bitmap, and a bitmap is what the
+next app is free to re-encode - which no key can undo afterwards. On the
+clipboard fallback the old rule still holds: copy the file in Finder with ⌘C,
+never the picture out of an opened PNG.
 
 **The key-id is their version of the fingerprint check.** They never saw the
 original, so a `restored` fingerprint tells them nothing. The `key-id` line does:
 it is a public digest of the key they just typed, and while the file still
 carries its own id in the name, the two match only when the key is the one the
 image was made with.
-
 ## How the transform works
 
 The key never travels with the image. Both directions re-derive the same material from the passphrase plus the image width and height.

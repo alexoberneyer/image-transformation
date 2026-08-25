@@ -27,9 +27,7 @@
 # image. Their keychain holds nothing filed under its key-id, and there is no
 # tty here for prompt_key to fall back to, so without it the command can only
 # ever run on the machine that minted the key. Left empty it changes nothing:
-# load_key_for_id returns early on an environment variable that is already set,
-# and otherwise resolves the key exactly as before. It also covers a file that
-# arrived renamed, with the key-id no longer in the name to read.
+# load_key_for_id returns early on an environment variable that is already set.
 #
 # `password` masks the input. It is still a command-line argument, which is the
 # one place these scripts otherwise take care to keep a key out of; a recipient
@@ -41,9 +39,41 @@
 
 export PATH="/opt/homebrew/bin:$PATH"
 
+scripts_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+noise_args=()
+
 if [ -n "${1:-}" ]; then
     export IMAGE_NOISE_KEY="$1"
+
+    # A key long enough to be worth having is too long to type, so it arrives by
+    # being pasted - which replaces whatever was on the clipboard, and the noise
+    # cannot be there too. The file selected in Finder is the one way in that
+    # does not compete for the clipboard.
+    #
+    # It is a fallback, not a redirect: nothing selected, or Finder not
+    # authorized, and this says so and lets clip-from-noise read the clipboard
+    # as it always has. That still works for a recipient who copied the file and
+    # keeps the key somewhere it need not be pasted.
+    selected=$(osascript \
+        -e 'tell application "Finder" to set sel to selection as alias list' \
+        -e 'if sel is {} then return ""' \
+        -e 'return POSIX path of (item 1 of sel)' 2>/dev/null) || selected=""
+
+    if [ -n "$selected" ]; then
+        noise_args=(-i "$selected")
+        echo "reading the noise from the Finder selection:"
+        echo "  $selected"
+        echo
+    else
+        echo "Nothing usable is selected in Finder, so the clipboard is being"
+        echo "read instead. If pasting the key replaced the image there, select"
+        echo "the noise file in Finder and run this again."
+        echo
+        echo "The first attempt asks macOS for permission to read the Finder"
+        echo "selection. If that was declined, turn it back on under System"
+        echo "Settings > Privacy & Security > Automation > Raycast > Finder."
+        echo
+    fi
 fi
 
-scripts_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
-exec "$scripts_dir/clip-from-noise" 2>&1
+exec "$scripts_dir/clip-from-noise" "${noise_args[@]}" 2>&1
