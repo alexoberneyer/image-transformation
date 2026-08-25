@@ -136,8 +136,9 @@ scripts/clip-to-noise           # clipboard now holds the noise
 scripts/clip-from-noise         # ...and now the original again
 ```
 
-The key comes from `$IMAGE_NOISE_KEY`, or the login keychain, or a prompt - in
-that order. To set one up once:
+The key comes from `$IMAGE_NOISE_KEY`, or the login keychain, or - with neither
+configured - a random one minted for that image alone. To use one passphrase
+across everything instead, set it up once:
 
 ```bash
 security add-generic-password -s image-noise -a "$USER" -w
@@ -162,6 +163,57 @@ The pasteboard itself is lossless as long as a lossless flavour is pinned, which
 the helper does. It advertises several at once - a single copy can offer PNG,
 TIFF, JPEG, GIF and AVIF - and asking for the wrong one silently destroys the
 payload.
+
+### Random keys
+
+With nothing configured, `clip-to-noise` does not ask for a passphrase. It draws
+32 bytes from the system CSPRNG, uses them for that one image, and hands the key
+back afterwards:
+
+```
+$ scripts/clip-to-noise
+wrote /tmp/image-noise/noise-20260825-095938-b36bda7681dcf4ca.png (320x240 noise)
+key-id b36bda7681dcf4ca
+source fingerprint f32c46cd062680ceafd1d5ee95d86181
+noise fingerprint f4fa663906bbec051cd179d720f27cb2
+clipboard now holds a reference to /tmp/image-noise/noise-20260825-095938-b36bda7681dcf4ca.png
+
+no key was configured, so this image got a random one:
+
+  84481026f385a9d16bb59ca330f3370ef28bbba5b40bbc170d8d5312fd086854
+
+Saved to the keychain, and the noise filename carries the key-id, so
+clip-from-noise will find it again on its own. Copy the key above to
+send this image to anyone else - they cannot read your keychain.
+```
+
+That is a strictly stronger secret than a passphrase - a full 256 bits, never
+reused across images - at the cost of having to keep it. Two things make that
+survivable.
+
+**The key-id names the key.** `to-noise` already prints a `key-id`, a public
+digest of the key that identifies it without revealing it. The minted key goes
+into the keychain filed under that id, and the id goes into the noise filename.
+`clip-from-noise` reads it back off the file reference on the clipboard and
+finds the right key on its own, however many images have their own key:
+
+```bash
+scripts/clip-to-noise      # mints a key, prints it, files it under its key-id
+scripts/clip-from-noise    # reads the id off the filename, restores
+```
+
+**The printed key is the copy you can send.** Nobody else can read your
+keychain, so a recipient needs the hex:
+
+```bash
+IMAGE_NOISE_KEY=84481026... scripts/clip-from-noise
+```
+
+The lookup needs a filename to read the id from, so it does not apply to
+`--bitmap`, to a path you chose yourself with `-o`, or to a file that has been
+renamed. Those still work - they just need the key handed back explicitly. The
+key is printed to stderr either way, so it lands in terminal scrollback; treat
+that the way you would treat any other secret on screen.
 
 ## How the transform works
 

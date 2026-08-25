@@ -14,13 +14,20 @@ func fail(_ message: String) -> Never {
     exit(1)
 }
 
+/// The file the pasteboard points at, if it holds a reference rather than a
+/// bitmap.
+func pasteboardFileURL() -> URL? {
+    var url: URL? = (pb.readObjects(forClasses: [NSURL.self]) as? [URL])?.first
+    if url == nil, let s = pb.string(forType: .fileURL) { url = URL(string: s) }
+    guard let file = url, file.isFileURL else { return nil }
+    return file
+}
+
 /// Bytes of a file the pasteboard points at, if it holds a file reference.
 /// The transform detects its format from content, so the bytes go through
 /// untouched rather than being re-encoded.
 func pasteboardFile() -> Data? {
-    var url: URL? = (pb.readObjects(forClasses: [NSURL.self]) as? [URL])?.first
-    if url == nil, let s = pb.string(forType: .fileURL) { url = URL(string: s) }
-    guard let file = url, file.isFileURL else { return nil }
+    guard let file = pasteboardFileURL() else { return nil }
     return try? Data(contentsOf: file)
 }
 
@@ -142,6 +149,12 @@ case "copy-file":
     // attach a file rather than inline a bitmap.
     pb.setPropertyList([url.path], forType: NSPasteboard.PasteboardType("NSFilenamesPboardType"))
 
+case "path":
+    // Where the clipboard's file reference points, without reading it. The
+    // name is what `clip-from-noise` mines for a key-id.
+    guard let file = pasteboardFileURL() else { fail("the clipboard holds no file reference") }
+    print(file.standardizedFileURL.path)
+
 default:
-    fail("usage: clipimg paste [--normalize] | clipimg copy <file>|- | clipimg copy-file <file>")
+    fail("usage: clipimg paste [--normalize] | clipimg copy <file>|- | clipimg copy-file <file> | clipimg path")
 }

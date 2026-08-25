@@ -8,6 +8,10 @@
 # puts the pixels on the clipboard instead, for the cases where an inline paste
 # is what you actually want.
 #
+# With no key configured - no $IMAGE_NOISE_KEY and nothing in the keychain - a
+# random one is minted for this image alone, printed, and stored under its
+# key-id so clip-from-noise can find it again.
+#
 # Usage: clip-to-noise [--bitmap] [-o <path>]
 
 source "$(dirname -- "${BASH_SOURCE[0]}")/common.sh"
@@ -18,14 +22,24 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --bitmap) bitmap=1 ;;
         -o|--output) out="${2:?-o needs a path}"; shift ;;
-        -h|--help) sed -n '2,12p' "$0" | cut -c3-; exit 0 ;;
+        -h|--help) sed -n '2,16p' "$0" | cut -c3-; exit 0 ;;
         *) echo "${0##*/}: unknown option $1" >&2; exit 1 ;;
     esac
     shift
 done
 
 require_tools
-load_key
+load_or_mint_key
+
+# to-noise reports the key-id and the fingerprints on stderr. They are held in a
+# file only long enough to read the key-id back out, then printed unchanged.
+# Nothing in there is secret.
+report_file=$(mktemp)
+trap 'rm -f "$report_file"' EXIT
+
+# Whether the noise ends up carrying its own key-id. A bitmap has no name to
+# put one in, and a path given with -o belongs to the caller.
+id_in_name=0
 
 # `--normalize` forces the clipboard image to 8-bit RGB with no alpha and no
 # colour profile. Screenshots and images copied out of a browser arrive in
@@ -34,22 +48,63 @@ load_key
 if [ "$bitmap" = 1 ]; then
     # Nothing touches the disk in this mode.
     "$bin_dir/clipimg" paste --normalize \
-        | "$bin_dir/to-noise" --key-env "$key_var" - -o - \
+        | "$bin_dir/to-noise" --key-env "$key_var" - -o - 2>"$report_file" \
         | "$bin_dir/clipimg" copy -
+    cat "$report_file" >&2
+    key_id=$(sed -n 's/^key-id \([0-9a-f]\{1,\}\)$/\1/p' "$report_file")
     echo "clipboard now holds the noise as a bitmap" >&2
-    exit 0
+else
+    if [ -z "$out" ]; then
+        tmp=${TMPDIR:-/tmp}
+        dir=${IMAGE_NOISE_DIR:-${tmp%/}/image-noise}
+        mkdir -p "$dir"
+        out="$dir/noise-$(date +%Y%m%d-%H%M%S).png"
+        chose_name=1
+    else
+        chose_name=0
+    fi
+
+    # Only the noise is ever written out; the original pixels stay in the pipe.
+    "$bin_dir/clipimg" paste --normalize \
+        | "$bin_dir/to-noise" --key-env "$key_var" - -o "$out" 2>"$report_file"
+    key_id=$(sed -n 's/^key-id \([0-9a-f]\{1,\}\)$/\1/p' "$report_file")
+
+    # The key-id goes in the name of any file we named ourselves. It gives away
+    # nothing, and it is what lets clip-from-noise pick the right key out of the
+    # keychain from a pasted file reference alone. The report is printed only
+    # afterwards, with the name to-noise was handed patched up to the one that
+    # actually exists.
+    if [ "$chose_name" = 1 ] && [ -n "$key_id" ]; then
+        with_id="${out%.png}-$key_id.png"
+        mv -- "$out" "$with_id"
+        sed -i '' "s|${out##*/}|${with_id##*/}|" "$report_file"
+        out=$with_id
+        id_in_name=1
+    fi
+    cat "$report_file" >&2
+
+    "$bin_dir/clipimg" copy-file "$out"
+    echo "clipboard now holds a reference to $out" >&2
 fi
 
-if [ -z "$out" ]; then
-    tmp=${TMPDIR:-/tmp}
-    dir=${IMAGE_NOISE_DIR:-${tmp%/}/image-noise}
-    mkdir -p "$dir"
-    out="$dir/noise-$(date +%Y%m%d-%H%M%S).png"
+if [ "$minted" = 1 ]; then
+    echo >&2
+    echo "no key was configured, so this image got a random one:" >&2
+    echo >&2
+    echo "  ${!key_var}" >&2
+    echo >&2
+    if [ -n "$key_id" ] && remember_key "$key_id"; then
+        if [ "$id_in_name" = 1 ]; then
+            echo "Saved to the keychain, and the noise filename carries the key-id, so" >&2
+            echo "clip-from-noise will find it again on its own. Copy the key above to" >&2
+            echo "send this image to anyone else - they cannot read your keychain." >&2
+        else
+            echo "Saved to the keychain under key-id $key_id, but this noise carries no" >&2
+            echo "name to read that id off, so hand the key back yourself:" >&2
+            echo "  IMAGE_NOISE_KEY=<the key above> clip-from-noise" >&2
+        fi
+    else
+        echo "It could NOT be saved to the keychain. Copy it now: without it the" >&2
+        echo "image is unrecoverable." >&2
+    fi
 fi
-
-# Only the noise is ever written out; the original pixels stay in the pipe.
-"$bin_dir/clipimg" paste --normalize \
-    | "$bin_dir/to-noise" --key-env "$key_var" - -o "$out"
-
-"$bin_dir/clipimg" copy-file "$out"
-echo "clipboard now holds a reference to $out" >&2
