@@ -35,6 +35,8 @@ pub const Args = struct {
     /// `--identity` paths, tried in order. `from-noise` only.
     identities: [][]u8,
     identity_passphrase_env: ?[]u8,
+    /// Report what the image needs and stop, without asking for any of it.
+    inspect: bool,
     input: []const u8,
     output: []const u8,
     format: image.Format,
@@ -121,6 +123,9 @@ fn usage(direction: Direction) []const u8 {
             \\      --identity-passphrase-env <name>
             \\                         Environment variable holding the passphrase for
             \\                         an encrypted private key
+            \\      --inspect          Report what this image needs in order to open,
+            \\                         and stop. Reads the header only, so it needs no
+            \\                         key at all.
             ,
             .footer =
             \\A wrong key, or a file altered anywhere along the way, is rejected
@@ -180,6 +185,7 @@ pub fn parse(ctx: Context, direction: Direction) !Args {
     var format_text: ?[]const u8 = null;
     var input: ?[]const u8 = null;
     var passphrase_env: ?[]const u8 = null;
+    var want_inspect = false;
 
     var recipients: std.ArrayList([]u8) = .empty;
     errdefer {
@@ -228,6 +234,9 @@ pub fn parse(ctx: Context, direction: Direction) !Args {
             const text = value orelse fatal("missing value for {s}", .{arg});
             try identities.append(allocator, try allocator.dupe(u8, text));
             i += 1;
+        } else if (std.mem.eql(u8, arg, "--inspect")) {
+            if (direction != .from_noise) fatal("{s} is only meaningful for from-noise", .{arg});
+            want_inspect = true;
         } else if (std.mem.eql(u8, arg, "--identity-passphrase-env")) {
             if (direction != .from_noise) fatal("{s} is only meaningful for from-noise", .{arg});
             passphrase_env = value orelse fatal("missing value for {s}", .{arg});
@@ -262,13 +271,13 @@ pub fn parse(ctx: Context, direction: Direction) !Args {
             if (direction == .to_noise) "--recipient" else "--identity",
         });
     }
-    if (key_sources == 0 and !public_keying) {
+    if (key_sources == 0 and !public_keying and !want_inspect) {
         fatal("provide a key (--key, --key-file, --key-hex, --key-env) or {s}", .{
             if (direction == .to_noise) "--recipient" else "--identity",
         });
     }
 
-    const key: ?[]u8 = if (public_keying) null else if (key_text) |text| key: {
+    const key: ?[]u8 = if (public_keying or key_sources == 0) null else if (key_text) |text| key: {
         if (text.len == 0) fatal("key must not be empty", .{});
         break :key try allocator.dupe(u8, text);
     } else if (key_env) |name| key: {
@@ -308,6 +317,7 @@ pub fn parse(ctx: Context, direction: Direction) !Args {
         .recipients = try recipients.toOwnedSlice(allocator),
         .identities = try identities.toOwnedSlice(allocator),
         .identity_passphrase_env = if (passphrase_env) |name| try allocator.dupe(u8, name) else null,
+        .inspect = want_inspect,
         .input = in_owned,
         .output = out_owned,
         .format = try resolveFormat(format_text, out_owned),
@@ -625,6 +635,46 @@ fn save(ctx: Context, args: Args, img: image.Image) !void {
     };
 }
 
+/// Says what an image needs in order to open, reading only the header. No key,
+/// no identity, nothing that could fail for the wrong reason - which is what
+/// lets a caller decide how to open something before asking anyone for a
+/// secret. Everything printed here is already in the clear in the file.
+fn inspect(ctx: Context, img: image.Image) !void {
+    const header = container.parseHeader(img.rgb) catch |err| switch (err) {
+        // No magic: either a v1 image or not one of ours. Both need a key to
+        // find out, and both are opened the same way.
+        error.NotV2 => {
+            try writeOut(ctx.io,
+                \\format v1
+                \\keying legacy
+                \\width {d}
+                \\height {d}
+                \\
+            , .{ img.width, img.height });
+            return;
+        },
+        error.UnsupportedVersion => fatal(
+            "this noise image was written by a newer build of the tools; upgrade to open it",
+            .{},
+        ),
+        error.MalformedHeader => fatal("this noise image has a corrupt header", .{}),
+    };
+
+    try writeOut(ctx.io,
+        \\format v2
+        \\keying {t}
+        \\
+    , .{header.kdf});
+    if (header.kdf == .x25519) {
+        try writeOut(ctx.io, "recipients {d}\n", .{header.recipient_count});
+    }
+    try writeOut(ctx.io,
+        \\width {d}
+        \\height {d}
+        \\
+    , .{ header.width, header.height });
+}
+
 pub fn run(ctx: Context, direction: Direction) !void {
     var args = try parse(ctx, direction);
     defer args.deinit();
@@ -639,6 +689,8 @@ pub fn run(ctx: Context, direction: Direction) !void {
         else => return err,
     };
     defer img.deinit();
+
+    if (args.inspect) return inspect(ctx, img);
 
     const outcome = switch (direction) {
         .to_noise => try toNoise(ctx, args, img),
@@ -747,4 +799,33 @@ test "the two directions agree on the shared noise label" {
     // The whole verification story rests on these matching.
     try std.testing.expectEqualStrings("noise", labels(.to_noise).output);
     try std.testing.expectEqualStrings("noise", labels(.from_noise).input);
+}
+
+test "the kdf names --inspect prints do not drift" {
+    // `from-noise --inspect` prints these verbatim and the clipboard scripts
+    // branch on the exact strings, so renaming a tag would quietly break the
+    // hotkey rather than fail to compile.
+    try std.testing.expectEqualStrings("x25519", @tagName(cipher.KdfId.x25519));
+    try std.testing.expectEqualStrings("argon2id", @tagName(cipher.KdfId.argon2id));
+    try std.testing.expectEqualStrings("raw", @tagName(cipher.KdfId.raw));
+}
+
+test "inspect needs no key" {
+    // The whole point: a caller can find out how to open an image before it has
+    // anything to open it with.
+    var args = Args{
+        .allocator = std.testing.allocator,
+        .key = null,
+        .kdf = .argon2id,
+        .recipients = &.{},
+        .identities = &.{},
+        .identity_passphrase_env = null,
+        .inspect = true,
+        .input = "",
+        .output = "",
+        .format = .png,
+    };
+    try std.testing.expect(args.key == null);
+    try std.testing.expect(args.inspect);
+    args = undefined;
 }

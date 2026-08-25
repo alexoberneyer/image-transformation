@@ -1,0 +1,97 @@
+#!/usr/bin/env bash
+
+# Required parameters:
+# @raycast.schemaVersion 1
+# @raycast.title Seal Image to Noise
+# @raycast.mode fullOutput
+
+# Optional parameters:
+# @raycast.icon 🔒
+# @raycast.packageName Image Noise
+# @raycast.argument1 {"type": "dropdown", "placeholder": "recipient", "optional": true, "data": [{"title": "(none saved yet)", "value": ""}]}
+# @raycast.argument2 { "type": "text", "placeholder": "more recipients (optional)", "optional": true }
+
+# Documentation:
+# @raycast.description Seal the image on the clipboard to somebody's public key
+# @raycast.author alexoberneyer
+# @raycast.authorURL https://github.com/alexoberneyer
+
+# Wraps scripts/clip-to-noise -r so it can run from a hotkey.
+#
+# The separate command is the point. `Image to Noise` encrypts something for
+# yourself; this sends it to somebody, which is a different intent with a
+# consequence that cannot be taken back - a sealed image cannot be opened by the
+# machine that made it. Two commands means two hotkeys, and means neither one
+# can turn into the other by leaving a field blank or filling one in by mistake.
+#
+# Two ways in, because neither covers everything on its own:
+#
+#   The dropdown is whatever is saved under ~/.config/image-noise/recipients,
+#   which is the fast path and the reason this is worth a hotkey at all. It is
+#   a static list baked into this file - Raycast has no way to populate one at
+#   run time - so `scripts/refresh-recipients` rewrites it after a key is added.
+#
+#   The text field is everything else: a name the dropdown has not caught up
+#   with, a path to a .pub file, or an ssh-ed25519 key pasted whole. Several
+#   names can go in at once, separated by spaces, which is also how you keep a
+#   copy for yourself - `alex me`, with your own public key saved as me.pub.
+#
+# They add up rather than override, so picking `alex` and typing `me` seals to
+# both. A stale dropdown is never blocking: the name still works typed.
+#
+# $IMAGE_NOISE_RECIPIENTS is deliberately not the mechanism here. Raycast runs
+# script commands in a shell that reads no profile, so an environment variable
+# set in a shell rc never reaches this - the same reason PATH has to be put back
+# below. It works from a terminal and nowhere else.
+
+export PATH="/opt/homebrew/bin:$PATH"
+
+scripts_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+
+# Anything typed or picked in a hotkey field arrives with whatever whitespace
+# came along with it.
+trim() {
+    local value=$1
+    value="${value#"${value%%[![:space:]]*}"}"
+    printf '%s' "${value%"${value##*[![:space:]]}"}"
+}
+
+picked=$(trim "${1:-}")
+typed=$(trim "${2:-}")
+
+noise_args=()
+[ -n "$picked" ] && noise_args+=(-r "$picked")
+
+if [ -n "$typed" ]; then
+    case "$typed" in
+        ssh-*)
+            # A pasted public key is one value that happens to contain spaces,
+            # not a list of names. Splitting it would destroy it.
+            noise_args+=(-r "$typed")
+            ;;
+        *)
+            for who in $typed; do
+                noise_args+=(-r "$who")
+            done
+            ;;
+    esac
+fi
+
+if [ ${#noise_args[@]} -eq 0 ]; then
+    echo "Nobody to seal to."
+    echo
+    echo "Pick a saved recipient, or type one: a name, a path to a .pub file, or"
+    echo "an ssh-ed25519 key pasted whole. Several names can be separated by"
+    echo "spaces."
+    echo
+    echo "Saved recipients live in ~/.config/image-noise/recipients:"
+    echo
+    echo "  mkdir -p ~/.config/image-noise/recipients"
+    echo "  cp their_key.pub ~/.config/image-noise/recipients/alex.pub"
+    echo "  scripts/refresh-recipients      # puts it in the dropdown"
+    echo
+    echo "To use the shared-key flow instead, run 'Image to Noise'."
+    exit 1
+fi
+
+exec "$scripts_dir/clip-to-noise" "${noise_args[@]}" 2>&1

@@ -130,6 +130,18 @@ belongs to - opening one is a trial decryption, so the image does not carry a
 list of who can read it. `--identity` can be repeated too, and each is tried in
 turn.
 
+`--inspect` says how an image expects to be opened without opening it. It reads
+the header only, so it needs no key and cannot fail for the wrong reason:
+
+```
+$ from-noise --inspect noise.png
+format v2
+keying x25519
+recipients 2
+width 320
+height 240
+```
+
 **Only `ssh-ed25519`.** RSA would need OAEP, which Zig's standard library keeps
 inside its certificate machinery rather than exposing for encryption, and ECDSA
 keys cannot do this at all - the same two exclusions age settles on. If a friend
@@ -216,6 +228,9 @@ in sight. They build what they need on first run.
 # copy an image, then:
 scripts/clip-to-noise           # clipboard now holds the noise
 scripts/clip-from-noise         # ...and now the original again
+
+# or seal it to somebody, and there is no key to hand over at all
+scripts/clip-to-noise -r alex
 ```
 
 `clip-from-noise -i <path>` reads the noise from a file instead of the
@@ -228,6 +243,48 @@ across everything instead, set it up once:
 
 ```bash
 security add-generic-password -s image-noise -a "$USER" -w
+```
+
+### Sealing from the clipboard
+
+`-r` seals to somebody's public key instead, and then none of the above applies:
+nothing is minted, nothing is stored in the keychain, and nothing has to be sent
+alongside the file. Give it the key, a path to it, or a short name:
+
+```bash
+mkdir -p ~/.config/image-noise/recipients
+cp ~/Downloads/alex_id_ed25519.pub ~/.config/image-noise/recipients/alex.pub
+
+scripts/clip-to-noise -r alex          # now `-r alex` is enough, forever
+scripts/clip-to-noise -r alex -r bob   # both of them, neither of you
+```
+
+`$IMAGE_NOISE_RECIPIENTS` sets a standing default, so the plain
+`scripts/clip-to-noise` seals too, and `$IMAGE_NOISE_RECIPIENTS_DIR` moves the
+directory. Both are shell environment, so they reach the terminal and nothing
+else - a hotkey never sees them, for the reason in [Raycast](#raycast-macos)
+below.
+
+Coming back, nothing needs to be said at all. `clip-from-noise` asks the file
+how it wants to be opened - `from-noise --inspect` reads the header, which
+costs no key and cannot prompt for the wrong secret - and picks the private key
+or the keychain accordingly:
+
+```bash
+scripts/clip-from-noise         # sealed or not, it works out which
+```
+
+The private key is `$IMAGE_NOISE_IDENTITY`, or `~/.ssh/id_ed25519`. If it is
+passphrase-protected you are asked for the passphrase, or it comes from
+`$IMAGE_NOISE_IDENTITY_PASSPHRASE` where there is no terminal to ask on.
+
+One thing worth being sure about before you use this in anger: **a sealed image
+cannot be opened by the machine that made it.** That is the property you are
+buying - the only copy of the key is sealed to somebody else - and it means
+keeping your own copy takes saying so:
+
+```bash
+scripts/clip-to-noise -r alex -r me    # if you want to be able to look again
 ```
 
 Two details in there are not incidental:
@@ -303,13 +360,44 @@ that the way you would treat any other secret on screen.
 
 ## Raycast (macOS)
 
-`scripts/raycast/` holds two Raycast script commands wrapping the clipboard
+`scripts/raycast/` holds three Raycast script commands wrapping the clipboard
 scripts, so the round trip runs from a hotkey instead of a terminal:
 
-| Command | Wraps |
-| --- | --- |
-| **Image to Noise** | `clip-to-noise` |
-| **Image from Noise** | `clip-from-noise` |
+| Command | Wraps | Arguments |
+| --- | --- | --- |
+| **Image to Noise** | `clip-to-noise` | none |
+| **Seal Image to Noise** | `clip-to-noise -r` | recipient dropdown, plus free text |
+| **Image from Noise** | `clip-from-noise` | key or passphrase, optional |
+
+**The two forward commands are deliberately separate.** Encrypting something
+for yourself and sending it to somebody else are different intents with
+different consequences - a sealed image cannot be opened by the machine that
+made it - and one command with an optional field would let either turn into the
+other by leaving it blank or filling it in by mistake. Two commands also means
+two hotkeys, and `Image to Noise` keeps taking no argument at all: one
+keystroke, no prompt, exactly as before.
+
+**Seal Image to Noise takes the recipient two ways, because neither covers
+everything.** The dropdown lists whatever is saved under
+`~/.config/image-noise/recipients` and is the reason this is worth a hotkey.
+The text field is everything else: a name the dropdown has not caught up with,
+a path to a `.pub`, or a key pasted whole. They add up rather than override, so
+picking `alex` and typing `me` seals to both - which is how you keep a copy for
+yourself, with your own public key saved as `me.pub`.
+
+A Raycast dropdown is a static list inside the script file; there is no way to
+fill one in at run time. `scripts/refresh-recipients` rewrites that one line
+from the directory:
+
+```bash
+cp their_key.pub ~/.config/image-noise/recipients/alex.pub
+scripts/refresh-recipients        # dropdown now offers: alex
+```
+
+It skips anything that is not `ssh-ed25519` rather than offering an entry that
+could never work, and it edits a tracked file, so expect a one-line diff
+afterwards. Forgetting to run it is never blocking - the name still works typed
+into the text field.
 
 Build once first, so the first press of the hotkey is not a compile:
 
@@ -330,10 +418,11 @@ an authorization dialog in the way.
 Three things about the wrappers are deliberate.
 
 **They run in `fullOutput` mode.** The interesting output is never the last
-line. Going out, a minted key is printed once and is the only copy a recipient
-can be handed; coming back, the fingerprints are the only thing separating a
-wrong key from a file that could not be opened at all. `compact` shows one line
-and would hide both.
+line. `Image to Noise` prints a minted key once, and that print is the only copy
+anyone else can be handed. `Seal Image to Noise` prints who it sealed to, which
+is the only confirmation it went to the person you meant - and the only place
+you would notice a typo that resolved to somebody else's key. `compact` shows
+one line and would hide both.
 
 **They fold stderr into stdout.** The clipboard scripts report on stderr to keep
 their pipes clean, and Raycast displays stdout.
@@ -342,6 +431,11 @@ their pipes clean, and Raycast displays stdout.
 non-interactive shell that reads no profile, so the PATH is bare and `zig` -
 which `require_tools` falls back to - is not on it. `swiftc` already lives in
 `/usr/bin` and needs no help.
+
+That last point is why the dropdown exists rather than an environment variable:
+a shell that reads no profile never sees `$IMAGE_NOISE_RECIPIENTS` either, so a
+standing default set in a shell rc works from a terminal and nowhere near a
+hotkey.
 
 `--bitmap` is deliberately not reachable from here. Inlining a bitmap lets the
 next app re-encode the noise, and a single keystroke is too short a path to an
@@ -354,11 +448,17 @@ re-paste that same reference next week is not.
 
 ### Handing an image to someone else
 
-**Image from Noise** takes an optional key, masked as it is typed. Left empty it
-behaves as it always did and resolves the key from the keychain. Filled in, it is
-the only way anyone who did not make the image can restore it: their keychain
-holds nothing under its key-id, and there is no tty here for `prompt_key` to fall
-back to.
+**Image from Noise** takes an optional secret, masked as it is typed. Left empty
+it behaves as it always did and resolves the key from the keychain, or the
+private key for a sealed image. Filled in, it is the only way anyone who did not
+make the image can restore it: their keychain holds nothing under its key-id, and
+there is no tty here to fall back to.
+
+It is one field for two kinds of secret because there is no third. A shared image
+wants the key; an image sealed to a public key wants the passphrase for the
+private key that opens it. Which one it is depends on the image, and
+`clip-from-noise` reads that off the header rather than guessing - both are
+exported, and whichever does not apply is never looked at.
 
 A key worth having is too long to type, so it arrives by being pasted - and that
 replaces whatever was on the clipboard, which cannot then also hold the noise.

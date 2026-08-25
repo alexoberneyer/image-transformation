@@ -8,7 +8,7 @@
 # Optional parameters:
 # @raycast.icon 🧩
 # @raycast.packageName Image Noise
-# @raycast.argument1 { "type": "password", "placeholder": "key hex (optional)", "optional": true }
+# @raycast.argument1 { "type": "password", "placeholder": "key or passphrase (optional)", "optional": true }
 
 # Documentation:
 # @raycast.description Restore the original image from the noise on the clipboard
@@ -23,11 +23,17 @@
 # Nothing else tells a wrong key from a re-encoded file, and compact mode shows
 # neither.
 #
-# The key argument is what makes this usable by anyone who did not make the
+# The secret argument is what makes this usable by anyone who did not make the
 # image. Their keychain holds nothing filed under its key-id, and there is no
 # tty here for prompt_key to fall back to, so without it the command can only
 # ever run on the machine that minted the key. Left empty it changes nothing:
 # load_key_for_id returns early on an environment variable that is already set.
+#
+# It is one field for two kinds of secret, because there is no third: a shared
+# image wants the key, and an image sealed to a public key wants the passphrase
+# for the private key that opens it. Which one this is depends on the image, and
+# clip-from-noise reads that off the header rather than guessing here. Both are
+# exported; whichever does not apply is simply never looked at.
 #
 # `password` masks the input. It is still a command-line argument, which is the
 # one place these scripts otherwise take care to keep a key out of; a recipient
@@ -53,6 +59,7 @@ key="${key%"${key##*[![:space:]]}"}"
 
 if [ -n "$key" ]; then
     export IMAGE_NOISE_KEY="$key"
+    export IMAGE_NOISE_IDENTITY_PASSPHRASE="$key"
 
     # A key long enough to be worth having is too long to type, so it arrives by
     # being pasted - which replaces whatever was on the clipboard, and the noise

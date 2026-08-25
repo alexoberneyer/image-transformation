@@ -21,6 +21,13 @@
 # that print is the only copy anyone else can be handed - a one-line summary
 # would hide exactly the thing that cannot be recovered later.
 #
+# This is the shared-key command, and it takes no argument on purpose: one
+# keystroke, no prompt. Sending an image to somebody else is a different intent
+# with a different consequence - a sealed image cannot be opened by the machine
+# that made it - so it lives in its own command, `Seal Image to Noise`, where it
+# gets its own hotkey and cannot happen by leaving a field blank or filling one
+# by accident.
+#
 # The default file-reference mode is the one that survives being pasted into a
 # chat, so --bitmap is deliberately not reachable from here: a hotkey that
 # inlines a bitmap is a fast way to make noise no one can invert.
