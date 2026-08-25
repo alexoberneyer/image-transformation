@@ -385,9 +385,17 @@ a path to a `.pub`, or a key pasted whole. They add up rather than override, so
 picking `alex` and typing `me` seals to both - which is how you keep a copy for
 yourself, with your own public key saved as `me.pub`.
 
-A Raycast dropdown is a static list inside the script file; there is no way to
-fill one in at run time. `scripts/refresh-recipients` rewrites that one line
-from the directory:
+A Raycast dropdown is a static list inside the script file - Raycast reads it
+before the script ever runs, so there is no way to fill one in at run time. The
+recipient list therefore has to be written into the file, and a file listing who
+you send things to has no business being in git. So the command is generated:
+
+```
+scripts/templates/image-to-noise-sealed.sh.in   tracked
+scripts/raycast/image-to-noise-sealed.sh        generated, gitignored
+```
+
+`scripts/refresh-recipients` renders one from the other:
 
 ```bash
 cp their_key.pub ~/.config/image-noise/recipients/alex.pub
@@ -395,9 +403,11 @@ scripts/refresh-recipients        # dropdown now offers: alex
 ```
 
 It skips anything that is not `ssh-ed25519` rather than offering an entry that
-could never work, and it edits a tracked file, so expect a one-line diff
-afterwards. Forgetting to run it is never blocking - the name still works typed
-into the text field.
+could never work, and checks that what it wrote still parses before installing
+it. Nothing needs running on a fresh clone: `require_tools` renders the command
+the first time any of these scripts is used, the same way it builds the
+binaries. Forgetting to re-run it after adding a key is never blocking either -
+the name still works typed into the text field.
 
 Build once first, so the first press of the hotkey is not a compile:
 

@@ -32,6 +32,13 @@ require_tools() {
         mkdir -p "$bin_dir"
         swiftc -O "$repo_root/tools/clipimg.swift" -o "$bin_dir/clipimg"
     fi
+    # A fresh clone has the template but not the command Raycast loads, since
+    # the rendered one is not tracked. Build it the same way the binaries get
+    # built: on first use, without being asked.
+    if [ ! -f "$sealed_command" ]; then
+        echo "rendering the sealed Raycast command..." >&2
+        render_sealed_command
+    fi
 }
 
 # 32 bytes from the system CSPRNG. Every key option the tool takes is funnelled
@@ -208,4 +215,99 @@ identity_args() {
         identity_flags+=(--identity-passphrase-env "$identity_var")
     fi
     echo "opening with $path" >&2
+}
+
+# --- The generated Raycast command ---------------------------------------
+#
+# A Raycast dropdown is static metadata: Raycast parses it out of the comment
+# block before the script ever runs, so there is no way to fill one in at run
+# time. The recipient list therefore has to be baked into the file - and a file
+# listing who you send things to has no business being tracked, so git holds the
+# template and ignores what comes out of it.
+
+sealed_template="$repo_root/scripts/templates/image-to-noise-sealed.sh.in"
+sealed_command="$repo_root/scripts/raycast/image-to-noise-sealed.sh"
+
+json_string() {
+    local value=$1
+    value=${value//\\/\\\\}
+    value=${value//\"/\\\"}
+    printf '%s' "$value"
+}
+
+# Fills `recipient_names` with every ssh-ed25519 key saved in the recipients
+# directory, and `recipient_skipped` with the ones that cannot be sealed to. A
+# dropdown entry that could never work is worse than no entry at all.
+scan_recipients() {
+    recipient_names=()
+    recipient_skipped=()
+    [ -d "$recipients_dir" ] || return 0
+
+    local key name kind _rest
+    shopt -s nullglob
+    for key in "$recipients_dir"/*.pub; do
+        name=${key##*/}
+        name=${name%.pub}
+        # The first field of a public key file is its type, and only one type
+        # can be sealed to.
+        if ! read -r kind _rest < "$key" 2>/dev/null || [ "$kind" != "ssh-ed25519" ]; then
+            recipient_skipped+=("$name")
+            continue
+        fi
+        recipient_names+=("$name")
+    done
+    shopt -u nullglob
+}
+
+# Renders the template into the command Raycast loads, with the dropdown filled
+# in. Nothing else in the template is touched.
+render_sealed_command() {
+    if [ ! -f "$sealed_template" ]; then
+        echo "${0##*/}: missing template $sealed_template" >&2
+        return 1
+    fi
+    scan_recipients
+
+    local data="" name escaped
+    if [ ${#recipient_names[@]} -gt 0 ]; then
+        for name in "${recipient_names[@]}"; do
+            escaped=$(json_string "$name")
+            [ -n "$data" ] && data="$data, "
+            data="$data{\"title\": \"$escaped\", \"value\": \"$escaped\"}"
+        done
+    else
+        # Raycast wants a non-empty list, and the placeholder keeps the shape
+        # stable so there is always an argument1 line to rewrite.
+        data='{"title": "(none saved yet)", "value": ""}'
+    fi
+
+    local line="# @raycast.argument1 {\"type\": \"dropdown\", \"placeholder\": \"recipient\", \"optional\": true, \"data\": [$data]}"
+    local tmp
+    tmp=$(mktemp "${TMPDIR:-/tmp}/image-noise-render.XXXXXX")
+
+    # Passed through the environment rather than -v, which would process
+    # backslash escapes in a value that is already JSON.
+    if ! REFRESH_LINE="$line" awk '
+        /^# @raycast\.argument1 / { print ENVIRON["REFRESH_LINE"]; replaced = 1; next }
+        { print }
+        END { if (!replaced) exit 3 }
+    ' "$sealed_template" > "$tmp"; then
+        rm -f "$tmp"
+        echo "${0##*/}: no @raycast.argument1 line in $sealed_template to fill in" >&2
+        return 1
+    fi
+
+    # Never install something that is not a script any more.
+    if ! bash -n "$tmp"; then
+        rm -f "$tmp"
+        echo "${0##*/}: the rendered command does not parse; leaving the old one alone" >&2
+        return 1
+    fi
+
+    mkdir -p "$(dirname "$sealed_command")"
+    # `cat >` rather than `mv`, so an existing file keeps its inode and Raycast
+    # keeps its registration.
+    cat "$tmp" > "$sealed_command"
+    chmod +x "$sealed_command"
+    rm -f "$tmp"
 }
