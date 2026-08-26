@@ -2,7 +2,7 @@
 
 # Required parameters:
 # @raycast.schemaVersion 1
-# @raycast.title Image to Noise
+# @raycast.title Zig Image to Noise
 # @raycast.mode fullOutput
 
 # Optional parameters:
@@ -24,7 +24,7 @@
 # This is the shared-key command, and it takes no argument on purpose: one
 # keystroke, no prompt. Sending an image to somebody else is a different intent
 # with a different consequence - a sealed image cannot be opened by the machine
-# that made it - so it lives in its own command, `Seal Image to Noise`, where it
+# that made it - so it lives in its own command, `Zig Seal Image to Noise`, where it
 # gets its own hotkey and cannot happen by leaving a field blank or filling one
 # by accident.
 #

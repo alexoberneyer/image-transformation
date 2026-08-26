@@ -2,7 +2,7 @@
 
 # Required parameters:
 # @raycast.schemaVersion 1
-# @raycast.title Image from Noise
+# @raycast.title Zig Image from Noise
 # @raycast.mode fullOutput
 
 # Optional parameters:

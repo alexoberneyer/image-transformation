@@ -365,19 +365,19 @@ scripts, so the round trip runs from a hotkey instead of a terminal:
 
 | Command | Wraps | Arguments |
 | --- | --- | --- |
-| **Image to Noise** | `clip-to-noise` | none |
-| **Seal Image to Noise** | `clip-to-noise -r` | recipient dropdown, plus free text |
-| **Image from Noise** | `clip-from-noise` | key or passphrase, optional |
+| **Zig Image to Noise** | `clip-to-noise` | none |
+| **Zig Seal Image to Noise** | `clip-to-noise -r` | recipient dropdown, plus free text |
+| **Zig Image from Noise** | `clip-from-noise` | key or passphrase, optional |
 
 **The two forward commands are deliberately separate.** Encrypting something
 for yourself and sending it to somebody else are different intents with
 different consequences - a sealed image cannot be opened by the machine that
 made it - and one command with an optional field would let either turn into the
 other by leaving it blank or filling it in by mistake. Two commands also means
-two hotkeys, and `Image to Noise` keeps taking no argument at all: one
+two hotkeys, and `Zig Image to Noise` keeps taking no argument at all: one
 keystroke, no prompt, exactly as before.
 
-**Seal Image to Noise takes the recipient two ways, because neither covers
+**Zig Seal Image to Noise takes the recipient two ways, because neither covers
 everything.** The dropdown lists whatever is saved under
 `~/.config/image-noise/recipients` and is the reason this is worth a hotkey.
 The text field is everything else: a name the dropdown has not caught up with,
@@ -428,8 +428,8 @@ an authorization dialog in the way.
 Three things about the wrappers are deliberate.
 
 **They run in `fullOutput` mode.** The interesting output is never the last
-line. `Image to Noise` prints a minted key once, and that print is the only copy
-anyone else can be handed. `Seal Image to Noise` prints who it sealed to, which
+line. `Zig Image to Noise` prints a minted key once, and that print is the only copy
+anyone else can be handed. `Zig Seal Image to Noise` prints who it sealed to, which
 is the only confirmation it went to the person you meant - and the only place
 you would notice a typo that resolved to somebody else's key. `compact` shows
 one line and would hide both.
@@ -458,7 +458,7 @@ re-paste that same reference next week is not.
 
 ### Handing an image to someone else
 
-**Image from Noise** takes an optional secret, masked as it is typed. Left empty
+**Zig Image from Noise** takes an optional secret, masked as it is typed. Left empty
 it behaves as it always did and resolves the key from the keychain, or the
 private key for a sealed image. Filled in, it is the only way anyone who did not
 make the image can restore it: their keychain holds nothing under its key-id, and
@@ -476,7 +476,7 @@ So the recipient does not put the image on the clipboard at all:
 
 1. Save the noise file and **select it in Finder**. No need to copy it.
 2. Copy the key.
-3. Run **Image from Noise** and paste the key into the argument.
+3. Run **Zig Image from Noise** and paste the key into the argument.
 
 The first run asks macOS for permission to read the Finder selection, once. If
 it is declined, the command says so and falls back to reading the clipboard,
