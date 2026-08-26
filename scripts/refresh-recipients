@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Rebuilds the "Seal Image to Noise" Raycast command from its template, with
+# Rebuilds the "Zig Seal Image to Noise" Raycast command from its template, with
 # the recipient dropdown filled in from the recipients directory.
 #
 # A Raycast dropdown is a static list inside the script file - Raycast reads it

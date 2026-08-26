@@ -2,7 +2,7 @@
 
 # Required parameters:
 # @raycast.schemaVersion 1
-# @raycast.title Seal Image to Noise
+# @raycast.title Zig Seal Image to Noise
 # @raycast.mode fullOutput
 
 # Optional parameters:
@@ -26,7 +26,7 @@
 #
 # Wraps scripts/clip-to-noise -r so it can run from a hotkey.
 #
-# The separate command is the point. `Image to Noise` encrypts something for
+# The separate command is the point. `Zig Image to Noise` encrypts something for
 # yourself; this sends it to somebody, which is a different intent with a
 # consequence that cannot be taken back - a sealed image cannot be opened by the
 # machine that made it. Two commands means two hotkeys, and means neither one
@@ -98,7 +98,7 @@ if [ ${#noise_args[@]} -eq 0 ]; then
     echo "  cp their_key.pub ~/.config/image-noise/recipients/alex.pub"
     echo "  scripts/refresh-recipients      # puts it in the dropdown"
     echo
-    echo "To use the shared-key flow instead, run 'Image to Noise'."
+    echo "To use the shared-key flow instead, run 'Zig Image to Noise'."
     exit 1
 fi
 
