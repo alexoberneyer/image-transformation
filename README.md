@@ -14,7 +14,14 @@ passphrase, so sending one to somebody costs them nothing to set up.
 
 ## Requirements
 
-- [Zig 0.16.x](https://ziglang.org/download/)
+- [Zig 0.16.x](https://ziglang.org/download/), and no other series
+
+`build.zig` refuses every other Zig. The pixel permutation comes from Zig's
+standard library random generator, which is not a specified byte stream. A
+newer Zig could change it and still compile, and every existing noise image
+would then fail as if the key were wrong. The
+[Rust port](https://github.com/alexoberneyer/image-transformation-rs)
+reimplements that generator and has no such constraint.
 
 ## Build
 
